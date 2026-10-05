@@ -5,7 +5,6 @@
 | Metric | Value |
 |--------|-------|
 | Developer Background | Backend engineer, no game dev experience |
-| AI Code Generation Rate | 99.9% |
 | Go Source Code | 120,000+ lines (388 files) |
 | Development Approach | BMAD-METHOD workflow + Claude Code |
 | Manual Intervention | Architecture decisions, prompting, review |
