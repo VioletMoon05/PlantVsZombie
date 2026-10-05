@@ -1,0 +1,87 @@
+name: Build and deploy PvZ Web
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: github-pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build WebAssembly site
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Build browser game
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build/web/icons
+
+          GOOS=js GOARCH=wasm go build \
+            -trimpath \
+            -ldflags="-s -w" \
+            -o build/web/pvz.wasm \
+            .
+
+          goroot="$(go env GOROOT)"
+          if [[ -f "$goroot/lib/wasm/wasm_exec.js" ]]; then
+            wasm_exec="$goroot/lib/wasm/wasm_exec.js"
+          elif [[ -f "$goroot/misc/wasm/wasm_exec.js" ]]; then
+            wasm_exec="$goroot/misc/wasm/wasm_exec.js"
+          else
+            echo "::error::wasm_exec.js not found in GOROOT ($goroot)"
+            exit 1
+          fi
+
+          wasm_size="$(wc -c < build/web/pvz.wasm)"
+          if (( wasm_size >= 100000000 )); then
+            echo "::error::pvz.wasm is ${wasm_size} bytes; keep it below GitHub's 100 MB file limit."
+            exit 1
+          fi
+
+          cp web/index.html build/web/index.html
+          cp web/manifest.webmanifest build/web/manifest.webmanifest
+          cp "$wasm_exec" build/web/wasm_exec.js
+          cp -R assets/icons/web/. build/web/icons/
+
+          cache_version="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          sed "s/__PVZ_CACHE_VERSION__/${cache_version}/g" web/sw.js > build/web/sw.js
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: build/web
+
+  deploy:
+    name: Deploy to GitHub Pages
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Deploy site
+        id: deployment
+        uses: actions/deploy-pages@v4

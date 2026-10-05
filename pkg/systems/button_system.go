@@ -1,0 +1,153 @@
+package systems
+
+import (
+	"log"
+
+	"github.com/gonewx/pvz/pkg/components"
+	"github.com/gonewx/pvz/pkg/ecs"
+	"github.com/gonewx/pvz/pkg/game"
+	"github.com/gonewx/pvz/pkg/utils"
+)
+
+// ButtonSystem 按钮交互系统
+// 负责处理按钮的鼠标悬停、点击等交互逻辑
+//
+// 职责：
+//   - 检测鼠标悬停（更新按钮状态为 UIHovered）
+//   - 检测鼠标点击（触发 OnClick 回调）
+//   - 根据 Enabled 状态决定是否响应交互
+//
+// 注意：光标形状由调用者（如 MainMenuScene）统一管理
+type ButtonSystem struct {
+	entityManager *ecs.EntityManager
+}
+
+// NewButtonSystem 创建按钮交互系统
+func NewButtonSystem(em *ecs.EntityManager) *ButtonSystem {
+	return &ButtonSystem{
+		entityManager: em,
+	}
+}
+
+// Update 更新按钮交互状态
+// 检测鼠标位置和释放，更新按钮状态并触发回调
+func (s *ButtonSystem) Update(deltaTime float64) {
+	// ✅ 检查虚拟键盘是否消费了本帧输入（阻止事件穿透）
+	if s.isInputConsumedByKeyboard() {
+		// 重置所有按钮状态为正常
+		entities := ecs.GetEntitiesWith2[*components.ButtonComponent, *components.PositionComponent](s.entityManager)
+		for _, entityID := range entities {
+			button, _ := ecs.GetComponent[*components.ButtonComponent](s.entityManager, entityID)
+			if button.Enabled {
+				button.State = components.UINormal
+			}
+		}
+		return
+	}
+
+	// 更新最后触摸位置
+	utils.UpdateLastTouchPosition()
+
+	// 获取鼠标位置
+	mouseX, mouseY := utils.GetPointerPosition()
+	mousePressed := utils.IsPointerPressed()
+	// 使用支持触摸的按下/释放检测
+	justPressed, pressX, pressY := utils.IsPointerJustPressed()
+	justReleased, releaseX, releaseY := utils.IsPointerJustReleased()
+
+	// ✅ 移动端触摸释放修复：当触摸释放时，GetPointerPosition() 返回 (0,0)
+	// 因为触摸点已不存在。此时应使用释放位置来判断悬停状态
+	hoverX, hoverY := mouseX, mouseY
+	if justReleased && releaseX != 0 && releaseY != 0 {
+		hoverX, hoverY = releaseX, releaseY
+	}
+
+	// 查询所有按钮实体
+	entities := ecs.GetEntitiesWith2[*components.ButtonComponent, *components.PositionComponent](s.entityManager)
+
+	for _, entityID := range entities {
+		button, _ := ecs.GetComponent[*components.ButtonComponent](s.entityManager, entityID)
+		pos, _ := ecs.GetComponent[*components.PositionComponent](s.entityManager, entityID)
+
+		// 禁用状态不响应交互
+		if !button.Enabled {
+			button.State = components.UIDisabled
+			continue
+		}
+
+		// DEBUG: 打印按钮位置和尺寸信息
+		if button.Text != "" && (justPressed || justReleased) {
+			log.Printf("[ButtonSystem] DEBUG: Button '%s' at (%.1f, %.1f), size: %.1fx%.1f, hover: (%d, %d), pressed=%v, released=%v, releasePos=(%d,%d)",
+				button.Text, pos.X, pos.Y, button.Width, button.Height, hoverX, hoverY, justPressed, justReleased, releaseX, releaseY)
+		}
+
+		// 检测指针是否在按钮范围内（使用修正后的悬停位置）
+		isHovered := s.isMouseInButton(float64(hoverX), float64(hoverY), pos.X, pos.Y, button.Width, button.Height)
+
+		if isHovered {
+			// 指针在按钮内
+			if justPressed {
+				// 检查按下位置是否也在按钮内
+				isPressInButton := s.isMouseInButton(float64(pressX), float64(pressY), pos.X, pos.Y, button.Width, button.Height)
+				if isPressInButton {
+					// 刚按下时播放按下音效（墓碑按钮专用）
+					if button.PressedSoundID != "" {
+						if audioManager := game.GetGameState().GetAudioManager(); audioManager != nil {
+							audioManager.PlaySound(button.PressedSoundID)
+						}
+					}
+					button.State = components.UIClicked
+				}
+			} else if mousePressed {
+				// 持续按下状态（显示按下效果）
+				button.State = components.UIClicked
+			} else if justReleased {
+				// 检查释放位置是否也在按钮内
+				isReleaseInButton := s.isMouseInButton(float64(releaseX), float64(releaseY), pos.X, pos.Y, button.Width, button.Height)
+				if isReleaseInButton {
+					// ✅ 释放时执行：释放瞬间触发回调和音效
+					// 播放按钮释放音效
+					if button.ClickSoundID != "" {
+						if audioManager := game.GetGameState().GetAudioManager(); audioManager != nil {
+							audioManager.PlaySound(button.ClickSoundID)
+						}
+					}
+					if button.OnClick != nil {
+						button.OnClick()
+					}
+				}
+				// 释放后恢复悬停状态
+				button.State = components.UIHovered
+			} else {
+				// 悬停状态
+				button.State = components.UIHovered
+			}
+		} else {
+			// 指针不在按钮内，恢复正常状态
+			button.State = components.UINormal
+		}
+	}
+
+	// 注意：光标形状由调用者（如 MainMenuScene）统一管理，此处不再设置
+}
+
+// isInputConsumedByKeyboard 检查虚拟键盘是否可见或消费了本帧输入
+// 当虚拟键盘可见时，阻断所有下层输入事件
+func (s *ButtonSystem) isInputConsumedByKeyboard() bool {
+	keyboards := ecs.GetEntitiesWith1[*components.VirtualKeyboardComponent](s.entityManager)
+	for _, kbEntity := range keyboards {
+		kb, ok := ecs.GetComponent[*components.VirtualKeyboardComponent](s.entityManager, kbEntity)
+		if ok && (kb.IsVisible || kb.InputConsumedThisFrame) {
+			return true
+		}
+	}
+	return false
+}
+
+// isMouseInButton 检测鼠标是否在按钮范围内
+func (s *ButtonSystem) isMouseInButton(mouseX, mouseY, buttonX, buttonY, buttonWidth, buttonHeight float64) bool {
+	return mouseX >= buttonX &&
+		mouseX <= buttonX+buttonWidth &&
+		mouseY >= buttonY &&
+		mouseY <= buttonY+buttonHeight
+}

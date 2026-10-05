@@ -1,0 +1,79 @@
+# Quality Gate Decision
+# Story 5.4.1: 爆炸死亡烧焦动画
+
+schema: 1
+story: "5.4.1"
+story_title: "爆炸死亡烧焦动画"
+gate: PASS
+status_reason: "功能实现完整，所有专用单元测试通过，代码已格式化"
+reviewer: "Quinn (Test Architect)"
+updated: "2025-11-26T11:12:00+08:00"
+
+waiver: { active: false }
+
+top_issues: []  # 所有问题已修复
+
+risk_summary:
+  totals: { critical: 0, high: 0, medium: 0, low: 0 }
+  recommendations:
+    must_fix: []
+    monitor:
+      - "持续关注后续相关 Story 的测试覆盖"
+
+quality_score: 95  # 功能完整，测试完善，代码规范
+
+evidence:
+  tests_reviewed: 8
+  risks_identified: 0
+  trace:
+    ac_covered: [1, 2, 3, 4, 5, 6]  # 所有 AC 已通过单元测试和游戏内测试验证
+    ac_gaps: []
+
+nfr_validation:
+  security:
+    status: PASS
+    notes: "不涉及用户输入或敏感数据"
+  performance:
+    status: PASS
+    notes: "Reanim 骨骼动画性能与普通死亡动画一致，无额外开销"
+  reliability:
+    status: PASS
+    notes: "运行时单位切换机制健壮，有错误处理"
+  maintainability:
+    status: PASS
+    notes: "专用单元测试确保未来重构的信心"
+
+recommendations:
+  immediate: []  # 无紧急修复项
+  future:
+    - action: "更新 PRD 和架构文档"
+      refs: ["docs/prd/requirements.md", "docs/architecture/data-models.md"]
+
+# 审查摘要
+review_summary:
+  strengths:
+    - "架构一致性：遵循 Story 10.6 的成熟死亡类型处理模式"
+    - "代码质量：函数结构清晰，职责分明，注释完整"
+    - "运行时单位切换：ReanimSystem.PlayCombo() 扩展是有价值的架构改进"
+    - "配置驱动：zombie_charred.yaml 完整定义了 death 组合"
+    - "游戏内测试：所有 6 个 AC 已验证通过"
+    - "单元测试完善：5 个专用测试覆盖核心功能"
+  weaknesses: []  # 所有问题已修复
+
+# 测试清单
+tests_added:
+  - name: "TestBehaviorZombieDyingExplosion"
+    file: "pkg/systems/behavior/behavior_system_test.go"
+    description: "验证烧焦死亡行为处理：动画完成后删除僵尸并增加消灭计数"
+  - name: "TestBehaviorZombieDyingExplosion_AnimationNotFinished"
+    file: "pkg/systems/behavior/behavior_system_test.go"
+    description: "验证动画未完成时不删除僵尸"
+  - name: "TestCherryBombExplosionCharredAnimation"
+    file: "pkg/systems/behavior/behavior_system_test.go"
+    description: "验证樱桃炸弹爆炸触发烧焦死亡动画"
+  - name: "TestCherryBombExplosion_NormalDeathUnaffected"
+    file: "pkg/systems/behavior/behavior_system_test.go"
+    description: "验证普通死亡不受影响"
+  - name: "TestQueryExplosionDyingZombies"
+    file: "pkg/systems/behavior/behavior_system_test.go"
+    description: "验证查询爆炸烧焦死亡中的僵尸"

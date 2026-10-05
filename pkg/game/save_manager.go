@@ -1,0 +1,813 @@
+package game
+
+import (
+	"fmt"
+	"log"
+	"regexp"
+	"sort"
+	"time"
+
+	"github.com/quasilyte/gdata/v2"
+	"gopkg.in/yaml.v3"
+)
+
+// SaveData 保存数据结构
+//
+// Story 8.6: 关卡进度保存系统
+//
+// 保存内容：
+//   - 最高完成关卡（如 "1-3" 表示完成了 1-3，可以玩 1-4）
+//   - 解锁的植物列表
+//   - 解锁的工具列表
+type SaveData struct {
+	HighestLevel   string   `yaml:"highestLevel"`   // 最高完成关卡ID，如 "1-3"
+	UnlockedPlants []string `yaml:"unlockedPlants"` // 已解锁植物ID列表
+	UnlockedTools  []string `yaml:"unlockedTools"`  // 已解锁工具ID列表，如 ["shovel"]
+	HasStartedGame bool     `yaml:"hasStartedGame"` // 是否已开始过游戏（用于区分新用户和老用户）
+}
+
+// UserMetadata 用户元数据
+//
+// Story 12.4: 用户管理 UI
+//
+// 存储用户的基本信息和时间戳
+type UserMetadata struct {
+	Username    string    `yaml:"username"`    // 用户名
+	CreatedAt   time.Time `yaml:"createdAt"`   // 创建时间
+	LastLoginAt time.Time `yaml:"lastLoginAt"` // 最后登录时间
+}
+
+// UserListData 用户列表数据
+//
+// Story 12.4: 用户管理 UI
+//
+// 存储所有用户的元数据和当前登录用户
+type UserListData struct {
+	Users       []UserMetadata `yaml:"users"`       // 所有用户列表
+	CurrentUser string         `yaml:"currentUser"` // 当前登录的用户名
+}
+
+// SaveManager 保存管理器
+//
+// Story 20.3: 使用 gdata API 实现跨平台存储
+//
+// 职责：
+//   - 加载和保存游戏进度
+//   - 管理关卡解锁状态
+//   - 管理植物和工具解锁状态
+//   - 管理多用户存档（Story 12.4）
+//
+// 架构说明：
+//   - 单例模式，全局唯一实例
+//   - 使用 gdata 跨平台存储 API（支持 Windows/Linux/macOS/Android/iOS/WASM）
+//   - 由 GameState 调用，不直接与系统交互
+type SaveManager struct {
+	gdataManager *gdata.Manager // gdata 跨平台存储管理器，可为 nil（降级模式）
+	currentUser  string         // 当前用户名
+	data         *SaveData      // 当前用户的存档数据
+	userList     *UserListData  // 用户列表数据
+}
+
+// gdata 存储路径常量
+const (
+	savesObject         = "saves"   // 存档对象名称
+	usersProperty       = "users"   // 用户列表属性名
+	BattleSaveKeySuffix = "_battle" // 战斗存档属性后缀
+)
+
+// NewSaveManager 创建保存管理器
+//
+// Story 20.3: 使用 gdata API 进行跨平台存储
+//
+// 参数：
+//   - gdataManager: gdata 跨平台存储管理器，可为 nil（降级模式，仅内存存储）
+//
+// 返回：
+//   - *SaveManager: 新创建的保存管理器实例
+//   - error: 如果创建失败返回错误
+func NewSaveManager(gdataManager *gdata.Manager) (*SaveManager, error) {
+	log.Printf("[SaveManager] Creating SaveManager, gdataManager=%v", gdataManager != nil)
+
+	sm := &SaveManager{
+		gdataManager: gdataManager,
+		currentUser:  "",
+		data: &SaveData{
+			HighestLevel:   "",
+			UnlockedPlants: []string{},
+			UnlockedTools:  []string{},
+		},
+		userList: &UserListData{
+			Users:       []UserMetadata{},
+			CurrentUser: "",
+		},
+	}
+
+	// 尝试加载用户列表
+	if err := sm.loadUserListFile(); err != nil {
+		// 加载失败不是致命错误，使用默认空列表
+		log.Printf("[SaveManager] Warning: Failed to load user list: %v (using defaults)", err)
+	}
+
+	// 如果有当前用户，加载其存档数据
+	if sm.userList.CurrentUser != "" {
+		sm.currentUser = sm.userList.CurrentUser
+		if err := sm.Load(); err != nil {
+			// 存档文件损坏或不存在，使用默认数据
+			log.Printf("[SaveManager] Warning: Failed to load save data for user %s: %v (using defaults)", sm.currentUser, err)
+		}
+	}
+
+	log.Printf("[SaveManager] SaveManager created, users=%d, currentUser=%q", len(sm.userList.Users), sm.currentUser)
+
+	return sm, nil
+}
+
+// loadUserListFile 从 gdata 加载用户列表
+func (sm *SaveManager) loadUserListFile() error {
+	// 降级模式：无法持久化，使用默认数据
+	if sm.gdataManager == nil {
+		return nil
+	}
+
+	// 检查用户列表是否存在
+	if !sm.gdataManager.ObjectPropExists(savesObject, usersProperty) {
+		// 文件不存在，使用默认空列表
+		return nil
+	}
+
+	// 从 gdata 加载数据
+	data, err := sm.gdataManager.LoadObjectProp(savesObject, usersProperty)
+	if err != nil {
+		return fmt.Errorf("failed to load user list: %w", err)
+	}
+
+	// 反序列化 YAML 数据
+	var userList UserListData
+	if err := yaml.Unmarshal(data, &userList); err != nil {
+		return fmt.Errorf("failed to parse user list: %w", err)
+	}
+
+	sm.userList = &userList
+	log.Printf("[SaveManager] User list loaded successfully, %d users found", len(sm.userList.Users))
+	return nil
+}
+
+// saveUserListFile 保存用户列表到 gdata
+func (sm *SaveManager) saveUserListFile() error {
+	// 降级模式：无法持久化，但不报错
+	if sm.gdataManager == nil {
+		return nil
+	}
+
+	// 序列化为 YAML
+	data, err := yaml.Marshal(sm.userList)
+	if err != nil {
+		return fmt.Errorf("failed to marshal user list: %w", err)
+	}
+
+	// 保存到 gdata
+	if err := sm.gdataManager.SaveObjectProp(savesObject, usersProperty, data); err != nil {
+		return fmt.Errorf("failed to write user list: %w", err)
+	}
+
+	log.Printf("[SaveManager] User list saved successfully")
+	return nil
+}
+
+// Load 从 gdata 加载保存数据
+//
+// 返回：
+//   - error: 如果加载失败返回错误
+func (sm *SaveManager) Load() error {
+	if sm.currentUser == "" {
+		return fmt.Errorf("no user selected")
+	}
+
+	// 降级模式：无法持久化，使用默认数据
+	if sm.gdataManager == nil {
+		sm.data = &SaveData{
+			HighestLevel:   "",
+			UnlockedPlants: []string{},
+			UnlockedTools:  []string{},
+		}
+		return nil
+	}
+
+	// 检查存档是否存在
+	if !sm.gdataManager.ObjectPropExists(savesObject, sm.currentUser) {
+		// 存档不存在，使用默认数据
+		sm.data = &SaveData{
+			HighestLevel:   "",
+			UnlockedPlants: []string{},
+			UnlockedTools:  []string{},
+		}
+		return nil
+	}
+
+	// 从 gdata 加载数据
+	data, err := sm.gdataManager.LoadObjectProp(savesObject, sm.currentUser)
+	if err != nil {
+		return fmt.Errorf("failed to load save data: %w", err)
+	}
+
+	// 反序列化 YAML 数据
+	var saveData SaveData
+	if err := yaml.Unmarshal(data, &saveData); err != nil {
+		return fmt.Errorf("failed to parse save data: %w", err)
+	}
+
+	sm.data = &saveData
+	log.Printf("[SaveManager] Save data loaded successfully for user %s", sm.currentUser)
+	return nil
+}
+
+// Save 保存数据到 gdata
+//
+// 返回：
+//   - error: 如果保存失败返回错误
+func (sm *SaveManager) Save() error {
+	if sm.currentUser == "" {
+		return fmt.Errorf("no user selected")
+	}
+
+	// 降级模式：无法持久化，但不报错
+	if sm.gdataManager == nil {
+		return nil
+	}
+
+	// 序列化为 YAML
+	data, err := yaml.Marshal(sm.data)
+	if err != nil {
+		return fmt.Errorf("failed to marshal save data: %w", err)
+	}
+
+	// 保存到 gdata
+	if err := sm.gdataManager.SaveObjectProp(savesObject, sm.currentUser, data); err != nil {
+		return fmt.Errorf("failed to write save data: %w", err)
+	}
+
+	log.Printf("[SaveManager] Save data saved successfully for user %s", sm.currentUser)
+	return nil
+}
+
+// GetHighestLevel 获取最高完成关卡
+//
+// 返回：
+//   - string: 最高完成关卡ID，如 "1-3"，空字符串表示未完成任何关卡
+func (sm *SaveManager) GetHighestLevel() string {
+	return sm.data.HighestLevel
+}
+
+// SetHighestLevel 设置最高完成关卡
+//
+// 只有当新关卡比当前记录更高时才更新
+//
+// 参数：
+//   - levelID: 关卡ID，如 "1-3"
+func (sm *SaveManager) SetHighestLevel(levelID string) {
+	// 简单比较：只要levelID不为空，就更新
+	// TODO: 实现关卡ID的大小比较（如 "1-4" > "1-3"）
+	if levelID != "" {
+		sm.data.HighestLevel = levelID
+	}
+}
+
+// ResetHighestLevel 重置最高完成关卡为空
+//
+// 用于重置游戏进度，使玩家可以从 1-1 重新开始
+func (sm *SaveManager) ResetHighestLevel() {
+	sm.data.HighestLevel = ""
+	log.Printf("[SaveManager] HighestLevel reset to empty")
+}
+
+// GetNextLevelToPlay 获取下一个应该加载的关卡
+//
+// 逻辑：
+//   - 如果没有完成任何关卡（HighestLevel 为空），返回 "1-1"
+//   - 否则返回已完成关卡的下一关（如 "1-1" → "1-2"）
+//   - 如果已完成所有关卡，返回最后一关（目前最大 "1-10"）
+//
+// 返回：
+//   - string: 下一个应该加载的关卡ID
+func (sm *SaveManager) GetNextLevelToPlay() string {
+	highest := sm.data.HighestLevel
+	if highest == "" {
+		return "1-1" // 新用户从 1-1 开始
+	}
+
+	// 解析关卡ID（格式："X-Y"）
+	var chapter, level int
+	_, err := fmt.Sscanf(highest, "%d-%d", &chapter, &level)
+	if err != nil {
+		log.Printf("[SaveManager] Failed to parse level ID: %s, defaulting to 1-1", highest)
+		return "1-1"
+	}
+
+	// 计算下一关
+	nextLevel := level + 1
+
+	// 检查是否超出章节最大关卡数（目前第1章最大10关）
+	maxLevelsPerChapter := 10
+	if nextLevel > maxLevelsPerChapter {
+		// 已完成所有关卡，返回最后一关
+		return fmt.Sprintf("%d-%d", chapter, maxLevelsPerChapter)
+	}
+
+	return fmt.Sprintf("%d-%d", chapter, nextLevel)
+}
+
+// GetHasStartedGame 获取是否已开始过游戏的标记
+//
+// 返回：
+//   - bool: true 表示用户已开始过游戏（显示 Adventure 按钮和关卡数字）
+//     false 表示新用户（显示 StartAdventure 按钮，不显示关卡数字）
+func (sm *SaveManager) GetHasStartedGame() bool {
+	return sm.data.HasStartedGame
+}
+
+// SetHasStartedGame 设置已开始游戏的标记
+//
+// 当用户首次点击"开始冒险吧"按钮时调用
+func (sm *SaveManager) SetHasStartedGame() {
+	sm.data.HasStartedGame = true
+}
+
+// GetUnlockedPlants 获取已解锁植物列表
+//
+// 返回：
+//   - []string: 已解锁植物ID列表（副本，修改不影响原数据）
+func (sm *SaveManager) GetUnlockedPlants() []string {
+	// 返回副本
+	plants := make([]string, len(sm.data.UnlockedPlants))
+	copy(plants, sm.data.UnlockedPlants)
+	return plants
+}
+
+// UnlockPlant 解锁植物
+//
+// 参数：
+//   - plantID: 植物ID，如 "sunflower"
+func (sm *SaveManager) UnlockPlant(plantID string) {
+	// 检查是否已解锁
+	for _, p := range sm.data.UnlockedPlants {
+		if p == plantID {
+			return // 已解锁，无需重复添加
+		}
+	}
+
+	// 添加到列表
+	sm.data.UnlockedPlants = append(sm.data.UnlockedPlants, plantID)
+}
+
+// GetUnlockedTools 获取已解锁工具列表
+//
+// 返回：
+//   - []string: 已解锁工具ID列表（副本，修改不影响原数据）
+func (sm *SaveManager) GetUnlockedTools() []string {
+	// 返回副本
+	tools := make([]string, len(sm.data.UnlockedTools))
+	copy(tools, sm.data.UnlockedTools)
+	return tools
+}
+
+// UnlockTool 解锁工具
+//
+// 参数：
+//   - toolID: 工具ID，如 "shovel"
+func (sm *SaveManager) UnlockTool(toolID string) {
+	// 检查是否已解锁
+	for _, t := range sm.data.UnlockedTools {
+		if t == toolID {
+			return // 已解锁，无需重复添加
+		}
+	}
+
+	// 添加到列表
+	sm.data.UnlockedTools = append(sm.data.UnlockedTools, toolID)
+}
+
+// IsToolUnlocked 检查工具是否已解锁
+//
+// 参数：
+//   - toolID: 工具ID，如 "shovel"
+//
+// 返回：
+//   - bool: true 表示已解锁，false 表示未解锁
+func (sm *SaveManager) IsToolUnlocked(toolID string) bool {
+	for _, t := range sm.data.UnlockedTools {
+		if t == toolID {
+			return true
+		}
+	}
+	return false
+}
+
+// --- 多用户管理方法 (Story 12.4) ---
+
+// LoadUserList 加载所有用户列表
+//
+// 返回：
+//   - []UserMetadata: 用户列表（按创建日期排序）
+//   - error: 如果加载失败返回错误
+func (sm *SaveManager) LoadUserList() ([]UserMetadata, error) {
+	// 按创建日期排序
+	users := make([]UserMetadata, len(sm.userList.Users))
+	copy(users, sm.userList.Users)
+	sort.Slice(users, func(i, j int) bool {
+		return users[i].CreatedAt.Before(users[j].CreatedAt)
+	})
+	return users, nil
+}
+
+// GetCurrentUser 获取当前登录用户名
+//
+// 返回：
+//   - string: 当前用户名，空字符串表示未登录
+func (sm *SaveManager) GetCurrentUser() string {
+	return sm.currentUser
+}
+
+// ValidateUsername 验证用户名合法性
+//
+// 规则：
+//   - 不能为空
+//   - 只能包含字母、数字、空格
+//   - 长度限制 1-20 字符
+//
+// 参数：
+//   - username: 用户名
+//
+// 返回：
+//   - error: 如果验证失败返回错误
+func (sm *SaveManager) ValidateUsername(username string) error {
+	// 检查空用户名
+	if username == "" {
+		return fmt.Errorf("请输入你的名字，以创建新的用户档案。档案用于保存游戏积分和进度。")
+	}
+
+	// 检查长度
+	if len(username) > 20 {
+		return fmt.Errorf("用户名长度不能超过 20 个字符")
+	}
+
+	// 检查字符（只允许字母、数字、空格）
+	matched, err := regexp.MatchString(`^[a-zA-Z0-9 ]+$`, username)
+	if err != nil {
+		return fmt.Errorf("failed to validate username: %w", err)
+	}
+	if !matched {
+		return fmt.Errorf("用户名只能包含字母、数字和空格")
+	}
+
+	return nil
+}
+
+// CreateUser 创建新用户
+//
+// 参数：
+//   - username: 用户名
+//
+// 返回：
+//   - error: 如果创建失败返回错误
+func (sm *SaveManager) CreateUser(username string) error {
+	// 验证用户名
+	if err := sm.ValidateUsername(username); err != nil {
+		return err
+	}
+
+	// 检查用户是否已存在
+	for _, user := range sm.userList.Users {
+		if user.Username == username {
+			return fmt.Errorf("用户名 '%s' 已存在", username)
+		}
+	}
+
+	// 创建新用户元数据
+	now := time.Now()
+	newUser := UserMetadata{
+		Username:    username,
+		CreatedAt:   now,
+		LastLoginAt: now,
+	}
+
+	// 添加到用户列表
+	sm.userList.Users = append(sm.userList.Users, newUser)
+	sm.userList.CurrentUser = username
+	sm.currentUser = username
+
+	// 创建默认存档数据
+	sm.data = &SaveData{
+		HighestLevel:   "",
+		UnlockedPlants: []string{},
+		UnlockedTools:  []string{},
+		HasStartedGame: false,
+	}
+
+	// 保存用户列表和存档
+	if err := sm.saveUserListFile(); err != nil {
+		return fmt.Errorf("failed to save user list: %w", err)
+	}
+
+	if err := sm.Save(); err != nil {
+		return fmt.Errorf("failed to save user data: %w", err)
+	}
+
+	log.Printf("[SaveManager] User '%s' created successfully", username)
+	return nil
+}
+
+// RenameUser 重命名用户
+//
+// Story 20.3: 使用 gdata API 实现，需要复制数据到新位置然后删除旧数据
+//
+// 参数：
+//   - oldName: 旧用户名
+//   - newName: 新用户名
+//
+// 返回：
+//   - error: 如果重命名失败返回错误
+func (sm *SaveManager) RenameUser(oldName, newName string) error {
+	// 验证新用户名
+	if err := sm.ValidateUsername(newName); err != nil {
+		return err
+	}
+
+	// 检查旧用户是否存在
+	userIndex := -1
+	for i, user := range sm.userList.Users {
+		if user.Username == oldName {
+			userIndex = i
+			break
+		}
+	}
+	if userIndex == -1 {
+		return fmt.Errorf("用户 '%s' 不存在", oldName)
+	}
+
+	// 检查新用户名是否已存在
+	for _, user := range sm.userList.Users {
+		if user.Username == newName {
+			return fmt.Errorf("用户名 '%s' 已存在", newName)
+		}
+	}
+
+	// 使用 gdata 重命名存档（加载旧数据 -> 保存新数据 -> 删除旧数据）
+	if sm.gdataManager != nil {
+		// 重命名用户进度存档
+		if sm.gdataManager.ObjectPropExists(savesObject, oldName) {
+			data, err := sm.gdataManager.LoadObjectProp(savesObject, oldName)
+			if err != nil {
+				return fmt.Errorf("failed to load old user data: %w", err)
+			}
+			if err := sm.gdataManager.SaveObjectProp(savesObject, newName, data); err != nil {
+				return fmt.Errorf("failed to save new user data: %w", err)
+			}
+			if err := sm.gdataManager.DeleteObjectProp(savesObject, oldName); err != nil {
+				log.Printf("[SaveManager] Warning: Failed to delete old user data: %v", err)
+			}
+		}
+
+		// 重命名战斗存档（如果存在）
+		oldBattleKey := oldName + BattleSaveKeySuffix
+		newBattleKey := newName + BattleSaveKeySuffix
+		if sm.gdataManager.ObjectPropExists(savesObject, oldBattleKey) {
+			data, err := sm.gdataManager.LoadObjectProp(savesObject, oldBattleKey)
+			if err != nil {
+				log.Printf("[SaveManager] Warning: Failed to load old battle save: %v", err)
+			} else {
+				if err := sm.gdataManager.SaveObjectProp(savesObject, newBattleKey, data); err != nil {
+					log.Printf("[SaveManager] Warning: Failed to save new battle save: %v", err)
+				} else {
+					if err := sm.gdataManager.DeleteObjectProp(savesObject, oldBattleKey); err != nil {
+						log.Printf("[SaveManager] Warning: Failed to delete old battle save: %v", err)
+					}
+				}
+			}
+		}
+	}
+
+	// 更新用户列表
+	sm.userList.Users[userIndex].Username = newName
+	if sm.userList.CurrentUser == oldName {
+		sm.userList.CurrentUser = newName
+		sm.currentUser = newName
+	}
+
+	// 保存用户列表
+	if err := sm.saveUserListFile(); err != nil {
+		return fmt.Errorf("failed to save user list: %w", err)
+	}
+
+	log.Printf("[SaveManager] User '%s' renamed to '%s' successfully", oldName, newName)
+	return nil
+}
+
+// DeleteUser 删除用户
+//
+// Story 20.3: 同时删除用户进度存档和战斗存档
+//
+// 参数：
+//   - username: 用户名
+//
+// 返回：
+//   - error: 如果删除失败返回错误
+func (sm *SaveManager) DeleteUser(username string) error {
+	// 检查用户是否存在
+	userIndex := -1
+	for i, user := range sm.userList.Users {
+		if user.Username == username {
+			userIndex = i
+			break
+		}
+	}
+	if userIndex == -1 {
+		return fmt.Errorf("用户 '%s' 不存在", username)
+	}
+
+	// 使用 gdata 删除存档
+	if sm.gdataManager != nil {
+		// 删除用户进度存档
+		if sm.gdataManager.ObjectPropExists(savesObject, username) {
+			if err := sm.gdataManager.DeleteObjectProp(savesObject, username); err != nil {
+				log.Printf("[SaveManager] Warning: Failed to delete user data: %v", err)
+			}
+		}
+
+		// 删除战斗存档
+		battleKey := username + BattleSaveKeySuffix
+		if sm.gdataManager.ObjectPropExists(savesObject, battleKey) {
+			if err := sm.gdataManager.DeleteObjectProp(savesObject, battleKey); err != nil {
+				log.Printf("[SaveManager] Warning: Failed to delete battle save: %v", err)
+			}
+		}
+	}
+
+	// 从用户列表中移除
+	sm.userList.Users = append(sm.userList.Users[:userIndex], sm.userList.Users[userIndex+1:]...)
+
+	// 如果删除的是当前用户，自动切换到其他用户
+	if sm.currentUser == username {
+		if len(sm.userList.Users) > 0 {
+			// 自动切换到第一个用户
+			newUser := sm.userList.Users[0].Username
+			sm.currentUser = newUser
+			sm.userList.CurrentUser = newUser
+			// 加载新用户的存档数据
+			if err := sm.Load(); err != nil {
+				log.Printf("[SaveManager] Warning: Failed to load data for user %s: %v", newUser, err)
+			}
+			log.Printf("[SaveManager] Auto-switched to user '%s' after deletion", newUser)
+		} else {
+			// 没有其他用户，清空当前用户
+			sm.currentUser = ""
+			sm.userList.CurrentUser = ""
+			sm.data = &SaveData{
+				HighestLevel:   "",
+				UnlockedPlants: []string{},
+				UnlockedTools:  []string{},
+				HasStartedGame: false,
+			}
+		}
+	}
+
+	// 保存用户列表
+	if err := sm.saveUserListFile(); err != nil {
+		return fmt.Errorf("failed to save user list: %w", err)
+	}
+
+	log.Printf("[SaveManager] User '%s' deleted successfully", username)
+	return nil
+}
+
+// SwitchUser 切换用户
+//
+// 参数：
+//   - username: 用户名
+//
+// 返回：
+//   - error: 如果切换失败返回错误
+func (sm *SaveManager) SwitchUser(username string) error {
+	// 检查用户是否存在
+	userExists := false
+	var userIndex int
+	for i, user := range sm.userList.Users {
+		if user.Username == username {
+			userExists = true
+			userIndex = i
+			break
+		}
+	}
+	if !userExists {
+		return fmt.Errorf("用户 '%s' 不存在", username)
+	}
+
+	// 保存当前用户存档（如果有）
+	if sm.currentUser != "" {
+		if err := sm.Save(); err != nil {
+			return fmt.Errorf("failed to save current user data: %w", err)
+		}
+	}
+
+	// 切换到新用户
+	sm.currentUser = username
+	sm.userList.CurrentUser = username
+
+	// 更新最后登录时间
+	sm.userList.Users[userIndex].LastLoginAt = time.Now()
+
+	// 加载新用户存档
+	if err := sm.Load(); err != nil {
+		// 存档不存在或损坏，使用默认数据
+		log.Printf("[SaveManager] Warning: Failed to load user data, using defaults: %v", err)
+		sm.data = &SaveData{
+			HighestLevel:   "",
+			UnlockedPlants: []string{},
+			UnlockedTools:  []string{},
+			HasStartedGame: false,
+		}
+	}
+
+	// 保存用户列表（更新最后登录时间）
+	if err := sm.saveUserListFile(); err != nil {
+		return fmt.Errorf("failed to save user list: %w", err)
+	}
+
+	log.Printf("[SaveManager] Switched to user '%s'", username)
+	return nil
+}
+
+// --- 战斗存档管理方法 (Story 18.1, 重构于 Story 20.3) ---
+
+// HasBattleSave 检查用户是否有战斗存档
+//
+// 参数：
+//   - username: 用户名
+//
+// 返回：
+//   - bool: true 表示存在战斗存档，false 表示不存在
+func (sm *SaveManager) HasBattleSave(username string) bool {
+	// 降级模式：无法检查持久化存储
+	if sm.gdataManager == nil {
+		return false
+	}
+
+	battleKey := username + BattleSaveKeySuffix
+	return sm.gdataManager.ObjectPropExists(savesObject, battleKey)
+}
+
+// GetBattleSaveInfo 获取战斗存档信息（预览）
+//
+// 读取存档文件的头部信息，无需加载完整的存档数据。
+// 用于在主菜单显示存档预览信息。
+//
+// 参数：
+//   - username: 用户名
+//
+// 返回：
+//   - *BattleSaveInfo: 存档预览信息
+//   - error: 如果读取失败返回错误
+func (sm *SaveManager) GetBattleSaveInfo(username string) (*BattleSaveInfo, error) {
+	// 降级模式：无法访问持久化存储
+	if sm.gdataManager == nil {
+		return nil, fmt.Errorf("gdata manager not available")
+	}
+
+	// 使用 BattleSerializer 加载完整数据
+	serializer := NewBattleSerializer(sm.gdataManager)
+	saveData, err := serializer.LoadBattle(username)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load battle save: %w", err)
+	}
+
+	return saveData.ToBattleSaveInfo(), nil
+}
+
+// DeleteBattleSave 删除用户的战斗存档
+//
+// 参数：
+//   - username: 用户名
+//
+// 返回：
+//   - error: 如果删除失败返回错误，文件不存在不视为错误
+func (sm *SaveManager) DeleteBattleSave(username string) error {
+	// 降级模式：无法访问持久化存储
+	if sm.gdataManager == nil {
+		return nil
+	}
+
+	battleKey := username + BattleSaveKeySuffix
+
+	// 检查是否存在
+	if !sm.gdataManager.ObjectPropExists(savesObject, battleKey) {
+		// 不存在，不视为错误
+		return nil
+	}
+
+	// 删除战斗存档
+	if err := sm.gdataManager.DeleteObjectProp(savesObject, battleKey); err != nil {
+		return fmt.Errorf("failed to delete battle save: %w", err)
+	}
+
+	log.Printf("[SaveManager] Battle save deleted for user '%s'", username)
+	return nil
+}

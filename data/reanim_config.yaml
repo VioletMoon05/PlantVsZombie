@@ -1,0 +1,16 @@
+global:
+    playback:
+        fps: 12
+        scale: 1
+        tps: 60
+    grid:
+        cell_height: 250
+        cell_width: 250
+        columns: 6
+        padding: 10
+        rows_per_page: 3
+        scroll_speed: 30
+    window:
+        height: 900
+        title: pvz Animation Showcase
+        width: 1600

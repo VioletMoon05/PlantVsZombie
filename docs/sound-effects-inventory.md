@@ -1,0 +1,253 @@
+# 🎵 pvz 音效资源汇总表
+
+> 最后更新: 2024-12-06
+> 音效目录: `assets/sounds/`
+> 总计: 157 个音效文件
+
+---
+
+## 一、使用状态概览
+
+| 状态 | 数量 | 说明 |
+|------|------|------|
+| ✅ 已使用 | ~25 | 已集成到代码中 |
+| 🔄 Story 10.9 覆盖 | ~50 | 核心游戏流程音效 |
+| ❌ 待后续实现 | ~86 | 特殊僵尸、戴夫语音等 |
+
+---
+
+## 二、已使用的音效
+
+| 音效文件 | 使用位置 | 说明 |
+|----------|----------|------|
+| `buttonclick.ogg` | `main_menu_buttons.go`, `loading_scene.go` | 按钮点击音/加载界面开始按钮 |
+| `gravebutton.ogg` | `main_menu_buttons.go` | 墓碑按钮点击 |
+| `dirt_rise.ogg` | `main_menu_scene.go` | 主菜单开场泥土松动音效 |
+| `roll_in.ogg` | `main_menu_scene.go` | 主菜单木牌滚入音效 |
+| `gravebusterchomp.ogg` | `sodding_system.go` | 开场铺草皮音效 |
+| `readysetplant.ogg` | `readysetplant_system.go`, `opening_animation_system.go` | "Ready Set Plant!" 语音 |
+| `shovel.ogg` | `shovel_interaction_system.go` | 铲子使用音 |
+| `points.ogg` | `input_system.go` | 收集阳光音效 |
+| `plant.ogg` | `input_system.go` | 种植音效 |
+| `buzzer.ogg` | `input_system.go` | 阳光不足警告音 |
+| `bowling.ogg` | `bowling_nut_system.go` | 保龄球滚动音 |
+| `bowlingimpact.ogg` | `bowling_nut_system.go` | 保龄球撞击音 |
+| `bowlingimpact2.ogg` | `bowling_nut_system.go` | 保龄球撞击音(变体) |
+| `explosion.ogg` | `bowling_nut_system.go` | 爆炸坚果爆炸音 |
+| `cherrybomb.ogg` | `plant_behavior_handler.go` (配置) | 樱桃炸弹爆炸音 |
+| `chomp.ogg` | `zombie_behavior_handler.go` (配置) | 僵尸啃食音 |
+| `seedlift.ogg` | `input_system.go` | 选中植物卡片音效 |
+| `awooga.ogg` | `wave_timing_system.go`, `flag_wave_warning_system.go` | 僵尸进场警报音效 |
+| `siren.ogg` | `wave_timing_system.go` | 第一波僵尸进场警报 |
+| `throw.ogg` | `plant_behavior_handler.go` | 豌豆射手发射子弹音效 |
+| `splat.ogg` | `physics_system.go` | 僵尸被豌豆击中音效 |
+| `tap2.ogg` | `reward_animation_system.go` | 点击卡包/下一关按钮音效 |
+| `thunder.ogg` | `reward_animation_system.go` | 奖励面板显示时的震撼效果 |
+
+⚠️ **注意**: 配置中有些路径使用 `assets/audio/Sound/` 但该目录不存在，需修正为 `assets/sounds/`
+
+---
+
+## 三、未使用音效分类汇总
+
+### 1. 🌱 植物相关音效
+
+| 音效文件 | 建议应用场景 | 优先级 | Story |
+|----------|--------------|--------|-------|
+| `plant2.ogg` | 种植音效变体 | 中 | 10.10 |
+| `plantgrow.ogg` | 植物生长(土豆地雷成熟等) | 高 | 10.9 |
+| `plant_water.ogg` | 水生植物种植 | 中 | 10.10 |
+| `puff.ogg` | 喷射/蘑菇类攻击 | 高 | 10.9 |
+| `fume.ogg` | 大喷菇喷雾攻击 | 高 | 10.9 |
+| `firepea.ogg` | 火焰豌豆发射 | 高 | 10.10 |
+| `snow_pea_sparkles.ogg` | 寒冰射手发射/冰冻效果 | 高 | 10.9 |
+| `frozen.ogg` | 冰冻效果 | 高 | 10.9 |
+| `potato_mine.ogg` | 土豆地雷爆炸 | 高 | 10.9 |
+| `squash_hmm.ogg` / `squash_hmm2.ogg` | 窝瓜发现目标 | 中 | 10.10 |
+| `jalapeno.ogg` | 火爆辣椒激活 | 高 | 10.10 |
+| `doomshroom.ogg` | 毁灭菇爆炸 | 高 | 10.10 |
+| `coffee.ogg` | 咖啡豆唤醒蘑菇 | 中 | 10.10 |
+| `wakeup.ogg` | 蘑菇被唤醒 | 中 | 10.10 |
+| `blover.ogg` | 三叶草吹风 | 中 | 10.10 |
+| `kernelpult.ogg` / `kernelpult2.ogg` | 玉米投手发射 | 高 | 10.10 |
+| `butter.ogg` | 黄油击中僵尸(黄油定身) | 高 | 10.10 |
+| `melonimpact.ogg` / `melonimpact2.ogg` | 西瓜击中音效 | 高 | 10.10 |
+| `coblaunch.ogg` | 玉米加农炮发射 | 中 | 10.10 |
+| `magnetshroom.ogg` | 磁力菇吸取金属 | 中 | 10.10 |
+| `gravebusterchomp.ogg` | 铺草皮动画音效 | 高 | 10.9 ✅ |
+| `slurp.ogg` | 吸取/食人花吞食 | 高 | 10.10 |
+| `gulp.ogg` | 吞咽音效 | 中 | 10.10 |
+| `plantern.ogg` | 路灯花照明 | 低 | 10.10 |
+
+### 2. 🧟 僵尸相关音效
+
+| 音效文件 | 建议应用场景 | 优先级 | Story |
+|----------|--------------|--------|-------|
+| `groan.ogg` ~ `groan6.ogg` | 僵尸呻吟(随机播放) | 高 | 10.9 |
+| `lowgroan.ogg` / `lowgroan2.ogg` | 低沉呻吟变体 | 中 | 10.9 |
+| `chomp2.ogg` | 僵尸啃食变体 | 高 | 10.9 |
+| `chompsoft.ogg` | 轻咬音效 | 中 | 10.11 |
+| `bigchomp.ogg` | 大口啃食(巨人僵尸?) | 高 | 10.11 |
+| `limbs_pop.ogg` | 僵尸肢体脱落 | 高 | 10.9 |
+| `scream.ogg` | 僵尸死亡尖叫 | 中 | 10.9 |
+| `splat.ogg` / `splat2.ogg` / `splat3.ogg` | 僵尸被击中/粉碎 | 高 | 10.9 ✅ (splat.ogg 已用于中弹) |
+| `yuck.ogg` / `yuck2.ogg` | 僵尸恶心音效 | 低 | 10.11 |
+| `gargantuar_thump.ogg` | 巨人僵尸脚步/砸地 | 高 | 10.11 |
+| `gargantudeath.ogg` | 巨人僵尸死亡 | 高 | 10.11 |
+| `imp.ogg` / `imp2.ogg` | 小鬼僵尸被抛出 | 高 | 10.11 |
+| `newspaper_rip.ogg` | 报纸被撕毁 | 高 | 10.11 |
+| `newspaper_rarrgh.ogg` / `newspaper_rarrgh2.ogg` | 报纸僵尸愤怒 | 高 | 10.11 |
+| `polevault.ogg` | 撑杆跳僵尸跳跃 | 高 | 10.11 |
+| `pogo_zombie.ogg` | 弹跳僵尸跳跃 | 高 | 10.11 |
+| `digger_zombie.ogg` | 矿工僵尸挖掘 | 高 | 10.11 |
+| `ladder_zombie.ogg` | 扶梯僵尸音效 | 中 | 10.11 |
+| `jackinthebox.ogg` | 小丑僵尸音乐盒 | 高 | 10.11 |
+| `jack_surprise.ogg` / `jack_surprise2.ogg` | 小丑僵尸爆炸前惊吓 | 高 | 10.11 |
+| `dancer.ogg` | 舞王僵尸召唤 | 高 | 10.11 |
+| `bungee_scream.ogg` ~ `bungee_scream3.ogg` | 蹦极僵尸尖叫 | 高 | 10.11 |
+| `dolphin_appears.ogg` | 海豚僵尸出现 | 中 | 10.11 |
+| `dolphin_before_jumping.ogg` | 海豚僵尸跳跃前 | 中 | 10.11 |
+| `zombiesplash.ogg` | 僵尸落水 | 高 | 10.11 |
+| `zombie_entering_water.ogg` | 僵尸入水 | 中 | 10.11 |
+| `zombie_falling_1.ogg` / `zombie_falling_2.ogg` | 僵尸坠落 | 中 | 10.11 |
+| `zamboni.ogg` | 雪橇车僵尸 | 高 | 10.11 |
+| `phonograph.ogg` | 舞王僵尸留声机 | 中 | 10.11 |
+| `mindcontrolled.ogg` | 催眠菇控制僵尸 | 高 | 10.10 |
+
+### 3. 🎮 游戏系统音效
+
+| 音效文件 | 建议应用场景 | 优先级 | Story |
+|----------|--------------|--------|-------|
+| `finalwave.ogg` | 最后一波提示 | **最高** | 10.9 |
+| `hugewave.ogg` | 大波僵尸来袭 | **最高** | 10.9 |
+| `siren.ogg` | 警报音效 | 高 | 10.9 ✅ |
+| `awooga.ogg` | 警报/僵尸来袭 | 高 | 10.9 ✅ |
+| `lawnmower.ogg` | 割草机启动 | **最高** | 10.9 |
+| `pool_cleaner.ogg` | 泳池清洁机 | 高 | 10.11 |
+| `winmusic.ogg` | 胜利音乐 | **最高** | 10.9 |
+| `losemusic.ogg` | 失败音乐 | **最高** | 10.9 |
+| `finalfanfare.ogg` | 最终胜利号角 | 高 | 10.9 |
+| `coin.ogg` | 金币收集 | 高 | 10.9 |
+| `moneyfalls.ogg` | 金币掉落 | 中 | 10.9 |
+| `prize.ogg` | 获得奖励 | 高 | 10.9 |
+| `chime.ogg` | 提示音 | 中 | 10.9 |
+| `bleep.ogg` | 提示/选中音 | 中 | 10.9 |
+| `tap.ogg` / `tap2.ogg` | 点击/轻触 | 中 | 已使用 ✅ (tap2 用于奖励界面) |
+| `pause.ogg` | 暂停音效 | 高 | 10.9 |
+| `seedlift.ogg` | 选中植物卡片 | 高 | 10.9 ✅ |
+| `roll_in.ogg` | 主菜单木牌滚入音效 | 高 | 10.9 ✅ |
+| `paper.ogg` | 纸张/菜单音效 | 中 | 10.9 |
+| `slotmachine.ogg` | 老虎机/传送带选择 | 中 | 10.9 |
+| `shoop.ogg` | 快速滑动音效 | 低 | 10.9 |
+
+### 4. 🔧 UI/交互音效
+
+| 音效文件 | 建议应用场景 | 优先级 | Story |
+|----------|--------------|--------|-------|
+| `shieldhit.ogg` / `shieldhit2.ogg` | 击中铁桶/路障 | 高 | 10.9 |
+| `plastichit.ogg` / `plastichit2.ogg` | 击中塑料装备 | 中 | 10.9 |
+| `ceramic.ogg` | 击中陶瓷(花盆?) | 中 | 10.9 |
+| `bonk.ogg` | 硬物碰撞 | 中 | 10.9 |
+| `boing.ogg` | 弹跳音效 | 中 | 10.9 |
+| `swing.ogg` | 挥动/攻击 | 中 | 10.11 |
+| `throw.ogg` / `throw2.ogg` | 豌豆射手发射音效 | 高 | 10.9 ✅ (throw.ogg 已使用) |
+
+### 5. 🌍 环境/特效音效
+
+| 音效文件 | 建议应用场景 | 优先级 | Story |
+|----------|--------------|--------|-------|
+| `rain.ogg` | 下雨场景 | 低 | - |
+| `thunder.ogg` | 雷电效果 | 高 | 10.9 ✅ (奖励面板显示时) |
+| `grassstep.ogg` | 草地脚步声 | 低 | - |
+| `dirt_rise.ogg` | 泥土隆起(主菜单开场/僵尸出土) | 高 | 10.9 ✅ |
+| `gravestone_rumble.ogg` | 墓碑颤动 | 高 | 10.9 |
+| `lightfill.ogg` | 阳光填充/光效 | 中 | 10.9 |
+| `watering.ogg` | 浇水音效 | 低 | - |
+| `fertilizer.ogg` | 施肥音效 | 低 | - |
+| `ignite.ogg` / `ignite2.ogg` | 点燃音效 | 高 | 10.10 |
+| `juicy.ogg` | 多汁/溅射 | 低 | - |
+| `floop.ogg` | 液体声 | 低 | - |
+| `portal.ogg` | 传送门 | 中 | - |
+| `vase_breaking.ogg` | 花瓶破碎(花瓶关) | 中 | - |
+| `hydraulic.ogg` / `hydraulic_short.ogg` | 液压/机械声 | 中 | - |
+| `bugspray.ogg` | 杀虫剂 | 低 | - |
+
+### 6. 🎭 特殊/角色音效
+
+| 音效文件 | 建议应用场景 | 优先级 | Story |
+|----------|--------------|--------|-------|
+| `crazydaveshort1-3.ogg` | 戴夫短语 | 中 | 10.12 |
+| `crazydavelong1-3.ogg` | 戴夫长语 | 中 | 10.12 |
+| `crazydaveextralong1-3.ogg` | 戴夫超长语 | 低 | 10.12 |
+| `crazydavecrazy.ogg` | 戴夫疯狂叫声 | 中 | 10.12 |
+| `crazydavescream.ogg` / `crazydavescream2.ogg` | 戴夫尖叫 | 低 | 10.12 |
+| `evillaugh.ogg` | 邪恶笑声 | 中 | 10.11 |
+| `sukhbir.ogg` ~ `sukhbir6.ogg` | 背景人声(舞王?) | 低 | 10.11 |
+| `ZombiesOnYourLawn.ogg` | 结局音乐 | 低 | - |
+
+### 7. 🚗 载具/特殊单位音效
+
+| 音效文件 | 建议应用场景 | 优先级 | Story |
+|----------|--------------|--------|-------|
+| `hatchback_open.ogg` / `hatchback_close.ogg` | 车门开关 | 低 | - |
+| `basketball.ogg` | 篮球僵尸投篮 | 中 | 10.11 |
+| `RVthrow.ogg` | RV投掷 | 低 | - |
+| `ballooninflate.ogg` | 气球膨胀 | 中 | 10.11 |
+| `balloon_pop.ogg` | 气球爆炸 | 高 | 10.11 |
+| `bossboulderattack.ogg` | Boss巨石攻击 | 中 | - |
+| `bossexplosion.ogg` | Boss爆炸 | 中 | - |
+| `reverse_explosion.ogg` | 反向爆炸 | 低 | - |
+| `zombaquarium_die.ogg` | 僵尸水族馆死亡 | 低 | - |
+
+### 8. 🎬 加载/界面音效
+
+| 音效文件 | 建议应用场景 | 优先级 | Story |
+|----------|--------------|--------|-------|
+| `loadingbar_flower.ogg` | 加载条-植物方 | 中 | - |
+| `loadingbar_zombie.ogg` | 加载条-僵尸方 | 中 | - |
+
+---
+
+## 四、优先级最高的待添加音效 (Top 20)
+
+| 序号 | 音效文件 | 应用场景 | Story |
+|------|----------|----------|-------|
+| 1 | `lawnmower.ogg` | 割草机启动并碾压僵尸 | 10.9 |
+| 2 | `finalwave.ogg` | 最后一波僵尸来袭提示 | 10.9 |
+| 3 | `hugewave.ogg` | 大波僵尸来袭警告 | 10.9 |
+| 4 | `winmusic.ogg` | 关卡胜利结算 | 10.9 |
+| 5 | `losemusic.ogg` | 关卡失败结算 | 10.9 |
+| 6 | `groan.ogg`系列 | 僵尸出现/行走时随机呻吟 | 10.9 |
+| 7 | `splat.ogg`系列 | 僵尸死亡 | 10.9 |
+| 8 | `limbs_pop.ogg` | 僵尸受伤肢体脱落 | 10.9 |
+| 9 | `potato_mine.ogg` | 土豆地雷爆炸 | 10.9 |
+| 10 | `puff.ogg` | 喷射蘑菇攻击 | 10.9 |
+| 11 | `fume.ogg` | 大喷菇攻击 | 10.9 |
+| 12 | `snow_pea_sparkles.ogg` | 寒冰射手攻击 | 10.9 |
+| 13 | `seedlift.ogg` | 选中植物卡片 | 10.9 ✅ |
+| 14 | `coin.ogg` | 金币收集 | 10.9 |
+| 15 | `shieldhit.ogg` | 击中铁桶/路障僵尸 | 10.9 |
+| 16 | `chomp2.ogg` | 僵尸啃食变体(轮换播放) | 10.9 |
+| 17 | `dirt_rise.ogg` | 墓碑僵尸出土 | 10.9 |
+| 18 | `gravestone_rumble.ogg` | 墓碑颤动预警 | 10.9 |
+| 19 | `pause.ogg` | 暂停游戏 | 10.9 |
+| 20 | `siren.ogg` | 警报音效 | 10.9 |
+
+---
+
+## 五、Story 规划
+
+| Story | 主题 | 覆盖音效数 | 状态 |
+|-------|------|-----------|------|
+| 10.9 | 核心游戏音效集成 | ~50 | Draft |
+| 10.10 | 戴夫语音系统 | ~12 | 待创建 |
+| 10.11 | 完整植物音效系统 | ~25 | 待创建 |
+| 10.12 | 特殊僵尸音效系统 | ~35 | 待创建 |
+
+---
+
+## 六、需要修复的问题
+
+1. **路径不一致**: 配置中使用 `assets/audio/Sound/` 但该目录不存在，应统一改为 `assets/sounds/`
+2. **titlescreen.ogg 缺失**: 主菜单引用了不存在的 `titlescreen.ogg`
+3. **mo3格式支持**: `mainmusic.mo3` 需要确认是否能正常播放

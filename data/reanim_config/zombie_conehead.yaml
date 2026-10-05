@@ -1,0 +1,100 @@
+id: zombie_conehead
+name: Zombie_Conehead
+reanim_file: data/reanim/Zombie.reanim
+default_animation: anim_idle
+scale: 1
+images:
+    IMAGE_REANIM_ZOMBIE_BODY: assets/reanim/Zombie_body.png
+    IMAGE_REANIM_ZOMBIE_CONE1: assets/reanim/Zombie_cone1.png
+    IMAGE_REANIM_ZOMBIE_CONE2: assets/reanim/Zombie_cone2.png
+    IMAGE_REANIM_ZOMBIE_CONE3: assets/reanim/Zombie_cone3.png
+    IMAGE_REANIM_ZOMBIE_HEAD: assets/reanim/Zombie_head.png
+    IMAGE_REANIM_ZOMBIE_INNERARM_HAND: assets/reanim/Zombie_innerarm_hand.png
+    IMAGE_REANIM_ZOMBIE_INNERARM_LOWER: assets/reanim/Zombie_innerarm_lower.png
+    IMAGE_REANIM_ZOMBIE_INNERARM_UPPER: assets/reanim/Zombie_innerarm_upper.png
+    IMAGE_REANIM_ZOMBIE_INNERLEG_FOOT: assets/reanim/Zombie_innerleg_foot.png
+    IMAGE_REANIM_ZOMBIE_INNERLEG_LOWER: assets/reanim/Zombie_innerleg_lower.png
+    IMAGE_REANIM_ZOMBIE_INNERLEG_UPPER: assets/reanim/Zombie_innerleg_upper.png
+    IMAGE_REANIM_ZOMBIE_JAW: assets/reanim/Zombie_jaw.png
+    IMAGE_REANIM_ZOMBIE_NECK: assets/reanim/Zombie_neck.png
+    IMAGE_REANIM_ZOMBIE_OUTERARM_HAND: assets/reanim/Zombie_outerarm_hand.png
+    IMAGE_REANIM_ZOMBIE_OUTERARM_LOWER: assets/reanim/Zombie_outerarm_lower.png
+    IMAGE_REANIM_ZOMBIE_OUTERARM_UPPER: assets/reanim/Zombie_outerarm_upper.png
+    IMAGE_REANIM_ZOMBIE_OUTERLEG_FOOT: assets/reanim/Zombie_outerleg_foot.png
+    IMAGE_REANIM_ZOMBIE_OUTERLEG_LOWER: assets/reanim/Zombie_outerleg_lower.png
+    IMAGE_REANIM_ZOMBIE_OUTERLEG_UPPER: assets/reanim/Zombie_outerleg_upper.png
+    IMAGE_REANIM_ZOMBIE_TIE: assets/reanim/Zombie_tie.png
+    IMAGE_REANIM_ZOMBIE_TONGUE: assets/reanim/Zombie_tongue.png
+available_animations:
+    - name: anim_idle
+      display_name: idle
+    - name: anim_walk
+      display_name: walk
+    - name: anim_walk2
+      display_name: walk2
+    - name: anim_eat
+      display_name: eat
+      speed: 2.5
+    - name: anim_death
+      display_name: death
+    - name: anim_death2
+      display_name: death2
+
+# 共享隐藏轨道配置（路障僵尸专用）
+# 路障僵尸需要显示路障，隐藏其他装备
+shared:
+    conehead_hidden_tracks: &conehead_hidden_tracks
+        - anim_bucket       # 隐藏铁桶
+        - anim_screendoor   # 隐藏铁门
+        - Zombie_flaghand   # 隐藏旗帜手
+        - Zombie_innerarm_screendoor
+        - Zombie_innerarm_screendoor_hand
+        - Zombie_outerarm_screendoor
+        - Zombie_duckytube
+        - Zombie_mustache
+        # 注意：不隐藏 anim_cone（路障僵尸需要显示路障）
+
+animation_combos:
+    - name: idle
+      display_name: 待机
+      animations:
+          - anim_idle
+      binding_strategy: auto
+      hidden_tracks: *conehead_hidden_tracks
+
+    - name: walk
+      display_name: 行走
+      animations:
+          - anim_walk
+      binding_strategy: auto
+      hidden_tracks: *conehead_hidden_tracks
+
+    - name: walk2
+      display_name: 行走2
+      animations:
+          - anim_walk2
+      binding_strategy: auto
+      hidden_tracks: *conehead_hidden_tracks
+
+    - name: eat
+      display_name: 啃食
+      animations:
+          - anim_eat
+      binding_strategy: auto
+      hidden_tracks: *conehead_hidden_tracks
+
+    - name: death
+      display_name: 死亡
+      animations:
+          - anim_death
+      loop: false
+      binding_strategy: auto
+      hidden_tracks: *conehead_hidden_tracks
+
+    - name: death2
+      display_name: 死亡2
+      animations:
+          - anim_death2
+      loop: false
+      binding_strategy: auto
+      hidden_tracks: *conehead_hidden_tracks

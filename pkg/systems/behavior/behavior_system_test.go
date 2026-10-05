@@ -1,0 +1,868 @@
+package behavior
+
+import (
+	"os"
+	"path/filepath"
+	"reflect"
+	"testing"
+
+	"github.com/gonewx/pvz/internal/particle"
+	"github.com/gonewx/pvz/pkg/components"
+	"github.com/gonewx/pvz/pkg/ecs"
+	"github.com/gonewx/pvz/pkg/game"
+	"github.com/gonewx/pvz/pkg/systems"
+	"github.com/hajimehoshi/ebiten/v2"
+)
+
+// init 函数在测试开始前切换到项目根目录
+// 确保所有相对路径（如 assets/）都能正确访问
+func init() {
+	// 查找项目根目录（包含 go.mod 文件的目录）
+	dir, err := os.Getwd()
+	if err != nil {
+		return
+	}
+
+	// 向上查找直到找到 go.mod
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			// 找到项目根目录，切换到该目录
+			os.Chdir(dir)
+			return
+		}
+
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			// 已经到达文件系统根目录，停止查找
+			return
+		}
+		dir = parent
+	}
+}
+
+// createTestBehaviorSystem 创建测试用的 BehaviorSystem（包含必需的依赖）
+// Bug Fix: 所有测试需要传入 LawnGridSystem 和 lawnGridEntityID
+// Story 14.3: Epic 14 - Removed ReanimSystem dependency
+func createTestBehaviorSystem(em *ecs.EntityManager, rm *game.ResourceManager, gs *game.GameState) *BehaviorSystem {
+	// 创建测试用的 LawnGridSystem
+	lgs := systems.NewLawnGridSystem(em, []int{1, 2, 3, 4, 5})
+
+	// 创建草坪网格实体
+	gridID := em.CreateEntity()
+	ecs.AddComponent(em, gridID, &components.LawnGridComponent{})
+
+	// 创建测试用的 ReanimSystem（用于获取轨道世界坐标）
+	rs := systems.NewReanimSystem(em)
+
+	// 返回完整的 BehaviorSystem
+	return NewBehaviorSystem(em, rm, gs, lgs, gridID, rs)
+}
+
+// TestZombieDeathParticleEffect 测试僵尸死亡时是否正确触发粒子效果
+// AC 9: 验证僵尸死亡时创建粒子发射器实体（MoweredZombieArm, MoweredZombieHead）
+func TestZombieDeathParticleEffect(t *testing.T) {
+	// 准备测试环境
+	em := ecs.NewEntityManager()
+	rm := game.NewResourceManager(getTestAudioContext())
+	gs := game.GetGameState()
+
+	// 加载粒子配置（模拟真实环境）
+	if _, err := rm.LoadParticleConfig("PeaSplat"); err != nil {
+		t.Skipf("跳过测试：无法加载粒子资源: %v", err)
+	}
+
+	bs := createTestBehaviorSystem(em, rm, gs)
+
+	// 创建测试僵尸实体
+	zombieID := em.CreateEntity()
+	em.AddComponent(zombieID, &components.BehaviorComponent{
+		Type: components.BehaviorZombieBasic,
+	})
+	em.AddComponent(zombieID, &components.PositionComponent{
+		X: 500.0,
+		Y: 300.0,
+	})
+	em.AddComponent(zombieID, &components.HealthComponent{
+		CurrentHealth: 0, // 生命值为0，触发死亡
+		MaxHealth:     100,
+	})
+	em.AddComponent(zombieID, &components.VelocityComponent{
+		VX: -20.0,
+	})
+	// 添加 ReanimComponent 用于动画播放（避免 ReanimSystem 报错）
+	em.AddComponent(zombieID, &components.ReanimComponent{
+		ReanimXML:  nil, // 测试环境简化，不加载真实动画数据
+		PartImages: make(map[string]*ebiten.Image),
+	})
+
+	// 记录触发前的发射器数量
+	initialEmitterCount := len(em.GetEntitiesWith(
+		reflect.TypeOf(&components.EmitterComponent{}),
+		reflect.TypeOf(&components.PositionComponent{}),
+	))
+
+	// 触发僵尸死亡
+	bs.triggerZombieDeath(zombieID)
+
+	// 验证：至少创建了粒子发射器实体
+	currentEmitterCount := len(em.GetEntitiesWith(
+		reflect.TypeOf(&components.EmitterComponent{}),
+		reflect.TypeOf(&components.PositionComponent{}),
+	))
+	if currentEmitterCount <= initialEmitterCount {
+		t.Errorf("僵尸死亡后未创建粒子发射器实体。初始发射器数: %d, 当前发射器数: %d",
+			initialEmitterCount, currentEmitterCount)
+	}
+
+	// 验证：查找粒子发射器实体
+	emitterEntities := em.GetEntitiesWith(
+		reflect.TypeOf(&components.EmitterComponent{}),
+		reflect.TypeOf(&components.PositionComponent{}),
+	)
+
+	// 验证：至少创建1个粒子发射器（头部）
+	// 注意：实际实现可能根据配置创建不同数量的发射器
+	if len(emitterEntities) < 1 {
+		t.Errorf("期望至少创建1个粒子发射器（头部），实际创建: %d", len(emitterEntities))
+	}
+
+	// 验证：粒子发射器位置与僵尸位置匹配
+	// 注意：由于测试环境中 ReanimXML 为 nil，无法获取头部轨道位置
+	// 代码会使用回退值（僵尸位置），因此期望位置为 (500, 300)
+	foundCorrectPosition := false
+	for _, emitterID := range emitterEntities {
+		posComp, ok := em.GetComponent(emitterID, reflect.TypeOf(&components.PositionComponent{}))
+		if !ok {
+			continue
+		}
+		pos := posComp.(*components.PositionComponent)
+		// 允许微小的浮点误差，检查回退位置（僵尸位置）
+		if pos.X >= 499.0 && pos.X <= 501.0 && pos.Y >= 299.0 && pos.Y <= 301.0 {
+			foundCorrectPosition = true
+			break
+		}
+	}
+
+	if !foundCorrectPosition {
+		t.Error("粒子发射器位置与僵尸位置不匹配（期望位置：500, 300，测试环境无头部轨道数据）")
+	}
+
+	// 验证：僵尸行为切换为 BehaviorZombieDying
+	behaviorComp, ok := em.GetComponent(zombieID, reflect.TypeOf(&components.BehaviorComponent{}))
+	if !ok {
+		t.Error("僵尸 BehaviorComponent 丢失")
+	} else {
+		behavior := behaviorComp.(*components.BehaviorComponent)
+		if behavior.Type != components.BehaviorZombieDying {
+			t.Errorf("僵尸行为类型未切换为 BehaviorZombieDying，当前类型: %v", behavior.Type)
+		}
+	}
+
+	// 验证：僵尸 VelocityComponent 被移除（停止移动）
+	if em.HasComponent(zombieID, reflect.TypeOf(&components.VelocityComponent{})) {
+		t.Error("僵尸 VelocityComponent 应该被移除，但仍然存在")
+	}
+}
+
+// TestCherryBombExplosionParticleEffect 测试樱桃炸弹爆炸时是否正确触发粒子效果
+// AC 9: 验证樱桃炸弹爆炸时创建粒子发射器实体（BossExplosion）
+func TestCherryBombExplosionParticleEffect(t *testing.T) {
+	// 准备测试环境
+	em := ecs.NewEntityManager()
+	// 使用共享的 getTestAudioContext()
+	rm := game.NewResourceManager(getTestAudioContext())
+	gs := game.GetGameState()
+
+	// 加载粒子配置（模拟真实环境）
+	if _, err := rm.LoadParticleConfig("PeaSplat"); err != nil {
+		t.Skipf("跳过测试：无法加载粒子资源: %v", err)
+	}
+
+	bs := createTestBehaviorSystem(em, rm, gs)
+
+	// 创建测试樱桃炸弹实体
+	cherryBombID := em.CreateEntity()
+	em.AddComponent(cherryBombID, &components.BehaviorComponent{
+		Type: components.BehaviorCherryBomb,
+	})
+	em.AddComponent(cherryBombID, &components.PositionComponent{
+		X: 400.0,
+		Y: 250.0,
+	})
+	em.AddComponent(cherryBombID, &components.PlantComponent{
+		GridCol: 3,
+		GridRow: 2,
+	})
+
+	// 记录触发前的发射器数量
+	initialEmitterCount := len(em.GetEntitiesWith(
+		reflect.TypeOf(&components.EmitterComponent{}),
+		reflect.TypeOf(&components.PositionComponent{}),
+	))
+
+	// 触发樱桃炸弹爆炸
+	bs.triggerCherryBombExplosion(cherryBombID)
+
+	// 验证：至少创建了粒子发射器实体
+	currentEmitterCount := len(em.GetEntitiesWith(
+		reflect.TypeOf(&components.EmitterComponent{}),
+		reflect.TypeOf(&components.PositionComponent{}),
+	))
+	if currentEmitterCount <= initialEmitterCount {
+		t.Errorf("樱桃炸弹爆炸后未创建粒子发射器实体。初始发射器数: %d, 当前发射器数: %d",
+			initialEmitterCount, currentEmitterCount)
+	}
+
+	// 验证：查找粒子发射器实体
+	emitterEntities := em.GetEntitiesWith(
+		reflect.TypeOf(&components.EmitterComponent{}),
+		reflect.TypeOf(&components.PositionComponent{}),
+	)
+
+	if len(emitterEntities) < 1 {
+		t.Errorf("期望至少创建1个粒子发射器（爆炸效果），实际创建: %d", len(emitterEntities))
+	}
+
+	// 验证：粒子发射器位置与樱桃炸弹位置匹配
+	foundCorrectPosition := false
+	for _, emitterID := range emitterEntities {
+		posComp, ok := em.GetComponent(emitterID, reflect.TypeOf(&components.PositionComponent{}))
+		if !ok {
+			continue
+		}
+		pos := posComp.(*components.PositionComponent)
+		// 允许微小的浮点误差
+		if pos.X >= 399.0 && pos.X <= 401.0 && pos.Y >= 249.0 && pos.Y <= 251.0 {
+			foundCorrectPosition = true
+			break
+		}
+	}
+
+	if !foundCorrectPosition {
+		t.Error("粒子发射器位置与樱桃炸弹位置不匹配（期望位置：400, 250）")
+	}
+
+	// 验证：粒子发射器配置正确（应该使用 BossExplosion 配置）
+	// 由于我们无法直接验证配置名称，这里验证发射器确实被创建且有效
+	for _, emitterID := range emitterEntities {
+		emitterComp, ok := em.GetComponent(emitterID, reflect.TypeOf(&components.EmitterComponent{}))
+		if !ok {
+			continue
+		}
+		emitter := emitterComp.(*components.EmitterComponent)
+		if emitter.Config == nil {
+			t.Error("粒子发射器配置为空")
+		}
+		if !emitter.Active {
+			t.Error("粒子发射器应该处于激活状态")
+		}
+	}
+}
+
+// TestParticleEffectErrorHandling 测试粒子效果创建失败时的错误处理
+// AC 9: 验证粒子配置加载失败时不阻塞游戏逻辑
+func TestParticleEffectErrorHandling(t *testing.T) {
+	// 准备测试环境（不加载粒子配置，模拟失败场景）
+	em := ecs.NewEntityManager()
+	// 使用共享的 getTestAudioContext()
+	rm := game.NewResourceManager(getTestAudioContext())
+	gs := game.GetGameState()
+
+	bs := createTestBehaviorSystem(em, rm, gs)
+
+	// 创建测试僵尸实体
+	zombieID := em.CreateEntity()
+	em.AddComponent(zombieID, &components.BehaviorComponent{
+		Type: components.BehaviorZombieBasic,
+	})
+	em.AddComponent(zombieID, &components.PositionComponent{
+		X: 500.0,
+		Y: 300.0,
+	})
+	em.AddComponent(zombieID, &components.HealthComponent{
+		CurrentHealth: 0,
+		MaxHealth:     100,
+	})
+	em.AddComponent(zombieID, &components.VelocityComponent{
+		VX: -20.0,
+	})
+	em.AddComponent(zombieID, &components.ReanimComponent{
+		ReanimXML:  nil, //  "Zombie",
+		PartImages: make(map[string]*ebiten.Image),
+	})
+
+	// 触发僵尸死亡（粒子配置未加载，应该失败但不阻塞）
+	// 这里不应该 panic 或返回错误，游戏逻辑应该继续
+	bs.triggerZombieDeath(zombieID)
+
+	// 验证：僵尸行为仍然切换为 BehaviorZombieDying（游戏逻辑未被阻塞）
+	behaviorComp, ok := em.GetComponent(zombieID, reflect.TypeOf(&components.BehaviorComponent{}))
+	if !ok {
+		t.Error("僵尸 BehaviorComponent 丢失")
+	} else {
+		behavior := behaviorComp.(*components.BehaviorComponent)
+		if behavior.Type != components.BehaviorZombieDying {
+			t.Errorf("粒子创建失败不应阻塞游戏逻辑。僵尸行为类型应为 BehaviorZombieDying，实际: %v", behavior.Type)
+		}
+	}
+
+	// 验证：僵尸 VelocityComponent 仍然被移除
+	if em.HasComponent(zombieID, reflect.TypeOf(&components.VelocityComponent{})) {
+		t.Error("粒子创建失败不应阻塞游戏逻辑。VelocityComponent 应该被移除")
+	}
+}
+
+// TestZombieDeathNoPosition 测试僵尸缺少 PositionComponent 时的错误处理
+// 验证缺少位置信息时不会导致崩溃
+func TestZombieDeathNoPosition(t *testing.T) {
+	// 准备测试环境
+	em := ecs.NewEntityManager()
+	// 使用共享的 getTestAudioContext()
+	rm := game.NewResourceManager(getTestAudioContext())
+	gs := game.GetGameState()
+
+	bs := createTestBehaviorSystem(em, rm, gs)
+
+	// 创建测试僵尸实体（故意不添加 PositionComponent）
+	zombieID := em.CreateEntity()
+	em.AddComponent(zombieID, &components.BehaviorComponent{
+		Type: components.BehaviorZombieBasic,
+	})
+	em.AddComponent(zombieID, &components.VelocityComponent{
+		VX: -20.0,
+	})
+	em.AddComponent(zombieID, &components.ReanimComponent{
+		ReanimXML:  nil, //  "Zombie",
+		PartImages: make(map[string]*ebiten.Image),
+	})
+
+	// 触发僵尸死亡（应该记录警告但不崩溃）
+	bs.triggerZombieDeath(zombieID)
+
+	// 验证：僵尸行为仍然切换为 BehaviorZombieDying
+	behaviorComp, ok := em.GetComponent(zombieID, reflect.TypeOf(&components.BehaviorComponent{}))
+	if !ok {
+		t.Error("僵尸 BehaviorComponent 丢失")
+	} else {
+		behavior := behaviorComp.(*components.BehaviorComponent)
+		if behavior.Type != components.BehaviorZombieDying {
+			t.Errorf("缺少 PositionComponent 不应阻塞游戏逻辑。僵尸行为类型应为 BehaviorZombieDying，实际: %v", behavior.Type)
+		}
+	}
+}
+
+// TestCherryBombExplosionNoPosition 测试樱桃炸弹缺少 PositionComponent 时的错误处理
+func TestCherryBombExplosionNoPosition(t *testing.T) {
+	// 准备测试环境
+	em := ecs.NewEntityManager()
+	// 使用共享的 getTestAudioContext()
+	rm := game.NewResourceManager(getTestAudioContext())
+	gs := game.GetGameState()
+
+	if _, err := rm.LoadParticleConfig("PeaSplat"); err != nil {
+		t.Skipf("跳过测试：无法加载粒子资源: %v", err)
+	}
+
+	bs := createTestBehaviorSystem(em, rm, gs)
+
+	// 创建测试樱桃炸弹实体（有 PlantComponent 但无 PositionComponent）
+	cherryBombID := em.CreateEntity()
+	em.AddComponent(cherryBombID, &components.BehaviorComponent{
+		Type: components.BehaviorCherryBomb,
+	})
+	em.AddComponent(cherryBombID, &components.PlantComponent{
+		GridCol: 3,
+		GridRow: 2,
+	})
+	// 故意不添加 PositionComponent
+
+	// 记录触发前的实体数量
+	initialEntityCount := countAllEntities(em)
+
+	// 触发樱桃炸弹爆炸（应该记录警告但不崩溃）
+	bs.triggerCherryBombExplosion(cherryBombID)
+
+	// 验证：即使缺少 PositionComponent，也应该尝试处理爆炸逻辑
+	// 粒子效果可能未创建，但游戏不应崩溃
+	currentEntityCount := countAllEntities(em)
+	// 这里我们不强制要求创建粒子发射器，因为缺少位置信息
+	// 只验证游戏逻辑未崩溃（测试通过即可）
+	t.Logf("樱桃炸弹爆炸处理完成。初始实体数: %d, 当前实体数: %d", initialEntityCount, currentEntityCount)
+}
+
+// mockEmitterConfig 创建一个模拟的粒子发射器配置（用于不需要真实资源的测试）
+func mockEmitterConfig() *particle.EmitterConfig {
+	return &particle.EmitterConfig{
+		ParticleDuration: "1000", // 1秒
+		LaunchSpeed:      "100",
+		LaunchAngle:      "0",
+	}
+}
+
+// countAllEntities 统计EntityManager中的所有实体数量（辅助函数）
+func countAllEntities(em *ecs.EntityManager) int {
+	// 通过查询所有可能的组件类型来统计实体数量
+	// 这是一个简化的实现，真实环境中EntityManager应该提供GetAllEntities方法
+	count := 0
+	seen := make(map[ecs.EntityID]bool)
+
+	// 查询所有拥有各种常见组件的实体
+	componentTypes := []reflect.Type{
+		reflect.TypeOf(&components.PositionComponent{}),
+		reflect.TypeOf(&components.BehaviorComponent{}),
+		reflect.TypeOf(&components.EmitterComponent{}),
+		reflect.TypeOf(&components.ParticleComponent{}),
+	}
+
+	for _, compType := range componentTypes {
+		entities := em.GetEntitiesWith(compType)
+		for _, entityID := range entities {
+			if !seen[entityID] {
+				seen[entityID] = true
+				count++
+			}
+		}
+	}
+
+	return count
+}
+
+// ========================================
+// Story 8.8: Game Freeze Tests
+// ========================================
+
+// TestBehaviorSystem_GameFreezeStopsPlantAttacks 测试游戏冻结时植物停止攻击
+func TestBehaviorSystem_GameFreezeStopsPlantAttacks(t *testing.T) {
+	em := ecs.NewEntityManager()
+	rm := game.NewResourceManager(getTestAudioContext())
+	gs := game.GetGameState()
+
+	bs := createTestBehaviorSystem(em, rm, gs)
+
+	// 创建一个豌豆射手
+	peashooterID := em.CreateEntity()
+	ecs.AddComponent(em, peashooterID, &components.BehaviorComponent{
+		Type: components.BehaviorPeashooter,
+	})
+	ecs.AddComponent(em, peashooterID, &components.PositionComponent{
+		X: 300.0,
+		Y: 300.0,
+	})
+	ecs.AddComponent(em, peashooterID, &components.PlantComponent{
+		GridCol: 2,
+		GridRow: 2,
+	})
+	ecs.AddComponent(em, peashooterID, &components.TimerComponent{
+		Name:        "attack",
+		TargetTime:  1.5,
+		CurrentTime: 1.5, // 已满，立即可以攻击
+		IsReady:     true,
+	})
+
+	// 创建一个僵尸（使豌豆射手有攻击目标）
+	zombieID := em.CreateEntity()
+	ecs.AddComponent(em, zombieID, &components.BehaviorComponent{
+		Type: components.BehaviorZombieBasic,
+	})
+	ecs.AddComponent(em, zombieID, &components.PositionComponent{
+		X: 500.0,
+		Y: 300.0, // 同一行
+	})
+	ecs.AddComponent(em, zombieID, &components.VelocityComponent{
+		VX: -50.0,
+	})
+
+	// 添加 GameFreezeComponent（模拟游戏冻结）
+	freezeEntityID := em.CreateEntity()
+	ecs.AddComponent(em, freezeEntityID, &components.GameFreezeComponent{
+		IsFrozen: true,
+	})
+	// 添加 ZombiesWonPhaseComponent（Phase 1 = 冻结阶段）
+	ecs.AddComponent(em, freezeEntityID, &components.ZombiesWonPhaseComponent{
+		CurrentPhase:    1, // Phase 1: 冻结
+		TriggerZombieID: zombieID,
+	})
+
+	// 记录更新前的子弹数量
+	initialBulletCount := len(ecs.GetEntitiesWith1[*components.BehaviorComponent](em))
+
+	// 执行 Update（游戏冻结状态下）
+	bs.Update(0.1)
+
+	// 验证：没有新的子弹产生（植物停止攻击）
+	currentBulletCount := len(ecs.GetEntitiesWith1[*components.BehaviorComponent](em))
+	if currentBulletCount != initialBulletCount {
+		t.Errorf("游戏冻结期间不应创建新子弹。初始: %d, 当前: %d", initialBulletCount, currentBulletCount)
+	}
+}
+
+// ========================================
+// Story 5.4.1: 爆炸死亡烧焦动画测试
+// ========================================
+
+// TestBehaviorZombieDyingExplosion 测试僵尸爆炸烧焦死亡行为处理
+// Story 5.4.1 AC 4: 烧焦动画播放完成后僵尸正确删除，增加消灭计数
+//
+// Given: 僵尸实体设置为 BehaviorZombieDyingExplosion，ReanimComponent 标记为 IsFinished = true
+// When: 调用 handleZombieDyingExplosionBehavior()
+// Then: 僵尸消灭计数增加 1，僵尸实体被删除
+func TestBehaviorZombieDyingExplosion(t *testing.T) {
+	// 准备测试环境
+	em := ecs.NewEntityManager()
+	rm := game.NewResourceManager(getTestAudioContext())
+	gs := game.GetGameState()
+
+	// 重置 GameState 的 ZombiesKilled 计数
+	initialKilled := gs.ZombiesKilled
+
+	bs := createTestBehaviorSystem(em, rm, gs)
+
+	// 创建测试僵尸实体（已处于爆炸烧焦死亡状态）
+	zombieID := em.CreateEntity()
+	ecs.AddComponent(em, zombieID, &components.BehaviorComponent{
+		Type: components.BehaviorZombieDyingExplosion,
+	})
+	ecs.AddComponent(em, zombieID, &components.PositionComponent{
+		X: 500.0,
+		Y: 300.0,
+	})
+	// 添加 ReanimComponent，标记动画已完成
+	ecs.AddComponent(em, zombieID, &components.ReanimComponent{
+		ReanimName: "zombie_charred",
+		IsFinished: true, // 动画已完成
+		IsLooping:  false,
+		PartImages: make(map[string]*ebiten.Image),
+	})
+
+	// 验证僵尸实体存在（通过检查组件）
+	if !ecs.HasComponent[*components.BehaviorComponent](em, zombieID) {
+		t.Fatal("测试前提：僵尸实体应该存在")
+	}
+
+	// 执行：调用烧焦死亡行为处理
+	bs.handleZombieDyingExplosionBehavior(zombieID)
+
+	// 注意：handleZombieDyingExplosionBehavior 会标记实体为删除
+	// 需要调用 RemoveMarkedEntities 来实际删除
+	em.RemoveMarkedEntities()
+
+	// 验证 1: 僵尸实体应该被删除（通过检查组件是否还存在）
+	if ecs.HasComponent[*components.BehaviorComponent](em, zombieID) {
+		t.Error("烧焦动画完成后，僵尸实体应该被删除")
+	}
+
+	// 验证 2: 僵尸消灭计数应该增加 1
+	currentKilled := gs.ZombiesKilled
+	if currentKilled != initialKilled+1 {
+		t.Errorf("僵尸消灭计数应该增加 1。初始: %d, 当前: %d", initialKilled, currentKilled)
+	}
+}
+
+// TestBehaviorZombieDyingExplosion_AnimationNotFinished 测试动画未完成时不删除僵尸
+// Story 5.4.1: 验证只有动画完成才删除僵尸
+func TestBehaviorZombieDyingExplosion_AnimationNotFinished(t *testing.T) {
+	// 准备测试环境
+	em := ecs.NewEntityManager()
+	rm := game.NewResourceManager(getTestAudioContext())
+	gs := game.GetGameState()
+
+	initialKilled := gs.ZombiesKilled
+
+	bs := createTestBehaviorSystem(em, rm, gs)
+
+	// 创建测试僵尸实体（动画未完成）
+	zombieID := em.CreateEntity()
+	ecs.AddComponent(em, zombieID, &components.BehaviorComponent{
+		Type: components.BehaviorZombieDyingExplosion,
+	})
+	ecs.AddComponent(em, zombieID, &components.PositionComponent{
+		X: 500.0,
+		Y: 300.0,
+	})
+	// 添加 ReanimComponent，标记动画未完成
+	ecs.AddComponent(em, zombieID, &components.ReanimComponent{
+		ReanimName: "zombie_charred",
+		IsFinished: false, // 动画尚未完成
+		IsLooping:  false,
+		PartImages: make(map[string]*ebiten.Image),
+	})
+
+	// 执行：调用烧焦死亡行为处理
+	bs.handleZombieDyingExplosionBehavior(zombieID)
+
+	// 验证 1: 僵尸实体应该仍然存在（动画未完成）
+	if !ecs.HasComponent[*components.BehaviorComponent](em, zombieID) {
+		t.Error("动画未完成时，僵尸实体不应该被删除")
+	}
+
+	// 验证 2: 僵尸消灭计数不应该增加
+	currentKilled := gs.ZombiesKilled
+	if currentKilled != initialKilled {
+		t.Errorf("动画未完成时，僵尸消灭计数不应该增加。初始: %d, 当前: %d", initialKilled, currentKilled)
+	}
+}
+
+// TestCherryBombExplosionCharredAnimation 测试樱桃炸弹爆炸触发烧焦死亡动画
+// Story 5.4.1 AC 1: 僵尸被樱桃炸弹杀死时播放烧焦动画而非普通死亡动画
+//
+// Given: 樱桃炸弹实体和僵尸实体（生命值 < 1800）
+// When: 触发樱桃炸弹爆炸
+// Then: 僵尸行为类型设置为 BehaviorZombieDyingExplosion，VelocityComponent 被移除
+func TestCherryBombExplosionCharredAnimation(t *testing.T) {
+	// 准备测试环境
+	em := ecs.NewEntityManager()
+	rm := game.NewResourceManager(getTestAudioContext())
+	gs := game.GetGameState()
+
+	bs := createTestBehaviorSystem(em, rm, gs)
+
+	// 创建樱桃炸弹实体
+	cherryBombID := em.CreateEntity()
+	ecs.AddComponent(em, cherryBombID, &components.BehaviorComponent{
+		Type: components.BehaviorCherryBomb,
+	})
+	ecs.AddComponent(em, cherryBombID, &components.PositionComponent{
+		X: 400.0,
+		Y: 300.0,
+	})
+	ecs.AddComponent(em, cherryBombID, &components.PlantComponent{
+		GridCol: 3,
+		GridRow: 2,
+	})
+
+	// 创建僵尸实体（在爆炸范围内，生命值低于爆炸伤害）
+	zombieID := em.CreateEntity()
+	ecs.AddComponent(em, zombieID, &components.BehaviorComponent{
+		Type: components.BehaviorZombieBasic,
+	})
+	ecs.AddComponent(em, zombieID, &components.PositionComponent{
+		X: 420.0, // 在樱桃炸弹附近（爆炸范围内）
+		Y: 300.0,
+	})
+	ecs.AddComponent(em, zombieID, &components.HealthComponent{
+		CurrentHealth: 270, // 普通僵尸生命值 < 1800 (爆炸伤害)
+		MaxHealth:     270,
+	})
+	ecs.AddComponent(em, zombieID, &components.VelocityComponent{
+		VX: -50.0,
+		VY: 0,
+	})
+	// 添加 ZombieTagComponent（僵尸标签组件）
+	ecs.AddComponent(em, zombieID, &components.ZombieTagComponent{})
+	// 添加 ReanimComponent
+	ecs.AddComponent(em, zombieID, &components.ReanimComponent{
+		ReanimName: "zombie",
+		IsFinished: false,
+		IsLooping:  true,
+		PartImages: make(map[string]*ebiten.Image),
+	})
+
+	// 验证初始状态
+	behaviorComp, _ := ecs.GetComponent[*components.BehaviorComponent](em, zombieID)
+	if behaviorComp.Type != components.BehaviorZombieBasic {
+		t.Fatalf("测试前提：僵尸应该是 BehaviorZombieBasic，实际: %v", behaviorComp.Type)
+	}
+
+	// 执行：触发樱桃炸弹爆炸
+	bs.triggerCherryBombExplosion(cherryBombID)
+
+	// 验证 1: 僵尸行为类型应该切换为 BehaviorZombieDyingExplosion（烧焦死亡）
+	behaviorComp, ok := ecs.GetComponent[*components.BehaviorComponent](em, zombieID)
+	if !ok {
+		t.Fatal("僵尸 BehaviorComponent 丢失")
+	}
+	if behaviorComp.Type != components.BehaviorZombieDyingExplosion {
+		t.Errorf("僵尸行为类型应该切换为 BehaviorZombieDyingExplosion（烧焦死亡），实际: %v", behaviorComp.Type)
+	}
+
+	// 验证 2: 僵尸 VelocityComponent 应该被移除（停止移动）
+	if em.HasComponent(zombieID, reflect.TypeOf(&components.VelocityComponent{})) {
+		t.Error("僵尸被爆炸杀死后，VelocityComponent 应该被移除")
+	}
+
+	// 验证 3: 应该添加了 AnimationCommand 组件（播放烧焦动画）
+	animCmd, hasAnimCmd := ecs.GetComponent[*components.AnimationCommandComponent](em, zombieID)
+	if !hasAnimCmd {
+		t.Error("僵尸应该添加 AnimationCommandComponent 来播放烧焦动画")
+	} else {
+		if animCmd.UnitID != "zombie_charred" {
+			t.Errorf("AnimationCommand 的 UnitID 应该是 'zombie_charred'，实际: '%s'", animCmd.UnitID)
+		}
+		if animCmd.ComboName != "death" {
+			t.Errorf("AnimationCommand 的 ComboName 应该是 'death'，实际: '%s'", animCmd.ComboName)
+		}
+	}
+}
+
+// TestCherryBombExplosion_NormalDeathUnaffected 测试普通死亡不受影响
+// Story 5.4.1 AC 5: 普通死亡方式（豌豆射手）不受影响，仍播放普通死亡动画
+func TestCherryBombExplosion_NormalDeathUnaffected(t *testing.T) {
+	// 准备测试环境
+	em := ecs.NewEntityManager()
+	rm := game.NewResourceManager(getTestAudioContext())
+	gs := game.GetGameState()
+
+	bs := createTestBehaviorSystem(em, rm, gs)
+
+	// 创建僵尸实体（模拟被普通攻击杀死）
+	zombieID := em.CreateEntity()
+	ecs.AddComponent(em, zombieID, &components.BehaviorComponent{
+		Type: components.BehaviorZombieBasic,
+	})
+	ecs.AddComponent(em, zombieID, &components.PositionComponent{
+		X: 500.0,
+		Y: 300.0,
+	})
+	ecs.AddComponent(em, zombieID, &components.HealthComponent{
+		CurrentHealth: 0, // 生命值为0
+		MaxHealth:     270,
+	})
+	ecs.AddComponent(em, zombieID, &components.VelocityComponent{
+		VX: -50.0,
+		VY: 0,
+	})
+	ecs.AddComponent(em, zombieID, &components.ReanimComponent{
+		ReanimName: "zombie",
+		IsFinished: false,
+		IsLooping:  true,
+		PartImages: make(map[string]*ebiten.Image),
+	})
+
+	// 执行：触发普通死亡（非爆炸）
+	bs.triggerZombieDeath(zombieID)
+
+	// 验证: 僵尸行为类型应该切换为 BehaviorZombieDying（普通死亡）而非 BehaviorZombieDyingExplosion
+	behaviorComp, ok := ecs.GetComponent[*components.BehaviorComponent](em, zombieID)
+	if !ok {
+		t.Fatal("僵尸 BehaviorComponent 丢失")
+	}
+	if behaviorComp.Type != components.BehaviorZombieDying {
+		t.Errorf("普通死亡应该切换为 BehaviorZombieDying，实际: %v", behaviorComp.Type)
+	}
+	if behaviorComp.Type == components.BehaviorZombieDyingExplosion {
+		t.Error("普通死亡不应该触发 BehaviorZombieDyingExplosion（烧焦死亡）")
+	}
+}
+
+// TestQueryExplosionDyingZombies 测试查询爆炸烧焦死亡中的僵尸
+// Story 5.4.1: 验证 queryExplosionDyingZombies 正确过滤僵尸
+func TestQueryExplosionDyingZombies(t *testing.T) {
+	// 准备测试环境
+	em := ecs.NewEntityManager()
+	rm := game.NewResourceManager(getTestAudioContext())
+	gs := game.GetGameState()
+
+	bs := createTestBehaviorSystem(em, rm, gs)
+
+	// 创建普通死亡僵尸
+	normalDyingZombie := em.CreateEntity()
+	ecs.AddComponent(em, normalDyingZombie, &components.BehaviorComponent{
+		Type: components.BehaviorZombieDying,
+	})
+	ecs.AddComponent(em, normalDyingZombie, &components.PositionComponent{X: 100, Y: 100})
+	ecs.AddComponent(em, normalDyingZombie, &components.ReanimComponent{})
+
+	// 创建爆炸烧焦死亡僵尸
+	explosionDyingZombie := em.CreateEntity()
+	ecs.AddComponent(em, explosionDyingZombie, &components.BehaviorComponent{
+		Type: components.BehaviorZombieDyingExplosion,
+	})
+	ecs.AddComponent(em, explosionDyingZombie, &components.PositionComponent{X: 200, Y: 200})
+	ecs.AddComponent(em, explosionDyingZombie, &components.ReanimComponent{})
+
+	// 创建另一个爆炸烧焦死亡僵尸
+	explosionDyingZombie2 := em.CreateEntity()
+	ecs.AddComponent(em, explosionDyingZombie2, &components.BehaviorComponent{
+		Type: components.BehaviorZombieDyingExplosion,
+	})
+	ecs.AddComponent(em, explosionDyingZombie2, &components.PositionComponent{X: 300, Y: 300})
+	ecs.AddComponent(em, explosionDyingZombie2, &components.ReanimComponent{})
+
+	// 创建普通僵尸（非死亡状态）
+	normalZombie := em.CreateEntity()
+	ecs.AddComponent(em, normalZombie, &components.BehaviorComponent{
+		Type: components.BehaviorZombieBasic,
+	})
+	ecs.AddComponent(em, normalZombie, &components.PositionComponent{X: 400, Y: 400})
+	ecs.AddComponent(em, normalZombie, &components.ReanimComponent{})
+
+	// 执行：查询爆炸烧焦死亡中的僵尸
+	explosionDyingZombies := bs.queryExplosionDyingZombies()
+
+	// 验证 1: 应该返回 2 个爆炸烧焦死亡僵尸
+	if len(explosionDyingZombies) != 2 {
+		t.Errorf("应该查询到 2 个爆炸烧焦死亡僵尸，实际: %d", len(explosionDyingZombies))
+	}
+
+	// 验证 2: 返回的僵尸应该是正确的实体
+	found1, found2 := false, false
+	for _, id := range explosionDyingZombies {
+		if id == explosionDyingZombie {
+			found1 = true
+		}
+		if id == explosionDyingZombie2 {
+			found2 = true
+		}
+	}
+	if !found1 || !found2 {
+		t.Error("查询结果应该包含所有爆炸烧焦死亡僵尸")
+	}
+
+	// 验证 3: 不应该包含普通死亡僵尸或普通僵尸
+	for _, id := range explosionDyingZombies {
+		if id == normalDyingZombie {
+			t.Error("查询结果不应该包含普通死亡僵尸")
+		}
+		if id == normalZombie {
+			t.Error("查询结果不应该包含普通僵尸")
+		}
+	}
+}
+
+// TestBehaviorSystem_TriggerZombieCanMoveInPhase2 测试触发僵尸在 Phase 2 可以移动
+func TestBehaviorSystem_TriggerZombieCanMoveInPhase2(t *testing.T) {
+	em := ecs.NewEntityManager()
+	rm := game.NewResourceManager(getTestAudioContext())
+	gs := game.GetGameState()
+
+	bs := createTestBehaviorSystem(em, rm, gs)
+
+	// 创建触发僵尸
+	zombieID := em.CreateEntity()
+	ecs.AddComponent(em, zombieID, &components.BehaviorComponent{
+		Type: components.BehaviorZombieBasic,
+	})
+	ecs.AddComponent(em, zombieID, &components.PositionComponent{
+		X: 300.0,
+		Y: 300.0,
+	})
+	ecs.AddComponent(em, zombieID, &components.VelocityComponent{
+		VX: -150.0,
+		VY: 0,
+	})
+
+	// 添加 GameFreezeComponent 和 ZombiesWonPhaseComponent（Phase 2）
+	freezeEntityID := em.CreateEntity()
+	ecs.AddComponent(em, freezeEntityID, &components.GameFreezeComponent{
+		IsFrozen: true,
+	})
+	ecs.AddComponent(em, freezeEntityID, &components.ZombiesWonPhaseComponent{
+		CurrentPhase:    2, // Phase 2: 僵尸入侵
+		TriggerZombieID: zombieID,
+	})
+
+	initialX := 300.0
+
+	// 执行 Update
+	bs.Update(0.1)
+
+	// 验证：触发僵尸应该继续移动（位置变化）
+	posComp, ok := ecs.GetComponent[*components.PositionComponent](em, zombieID)
+	if !ok {
+		t.Fatalf("failed to get position component")
+	}
+
+	if posComp.X >= initialX {
+		t.Errorf("触发僵尸在 Phase 2 应该继续移动（向左）。初始X: %f, 当前X: %f", initialX, posComp.X)
+	}
+}

@@ -1,0 +1,875 @@
+package entities
+
+import (
+	"fmt"
+	"log"
+	"strings"
+
+	"github.com/gonewx/pvz/pkg/components"
+	"github.com/gonewx/pvz/pkg/config"
+	"github.com/gonewx/pvz/pkg/ecs"
+	"github.com/gonewx/pvz/pkg/game"
+	"github.com/gonewx/pvz/pkg/types"
+	"github.com/hajimehoshi/ebiten/v2"
+)
+
+// ReanimSystemInterface 定义 ReanimSystem 的接口，用于工厂函数依赖注入
+// 这样可以避免循环依赖，同时方便测试
+// Story 13.8: 简化接口，只保留核心 API
+type ReanimSystemInterface interface {
+	// 核心动画播放 API
+	PlayAnimation(entityID ecs.EntityID, animName string) error
+	PlayCombo(entityID ecs.EntityID, unitID, comboName string) error
+	// RenderToTexture 将指定实体的 Reanim 渲染到目标纹理（离屏渲染）
+	RenderToTexture(entityID ecs.EntityID, target *ebiten.Image) error
+	// PrepareStaticPreview prepares a Reanim entity for static preview (Story 11.1)
+	PrepareStaticPreview(entityID ecs.EntityID, plantType types.PlantType) error
+}
+
+// NewPlantEntity 创建植物实体
+// 根据植物类型和网格位置创建一个完整的植物实体，包含位置、图像和植物组件
+//
+// 参数:
+//   - em: 实体管理器
+//   - rm: 资源管理器（用于加载植物图像和 Reanim 资源）
+//   - gs: 游戏状态（用于获取摄像机位置）
+//   - rs: Reanim 系统（用于初始化动画）
+//   - plantType: 植物类型（向日葵、豌豆射手等）
+//   - col: 网格列索引 (0-8)
+//   - row: 网格行索引 (0-4)
+//
+// 返回:
+//   - ecs.EntityID: 创建的植物实体ID，如果失败返回 0
+//   - error: 如果创建失败返回错误信息
+func NewPlantEntity(em *ecs.EntityManager, rm ResourceLoader, gs *game.GameState, rs ReanimSystemInterface, plantType components.PlantType, col, row int) (ecs.EntityID, error) {
+	// 计算植物原点坐标（使用世界坐标系统）
+	// Reanim 坐标系统：部件坐标从原点开始绘制
+	// 中心偏移会由 ReanimSystem 自动计算并在渲染时应用
+	worldCenterX := config.GridWorldStartX + float64(col)*config.CellWidth + config.CellWidth/2
+	worldCenterY := config.GridWorldStartY + float64(row)*config.CellHeight + config.CellHeight/2 + config.PlantOffsetY
+
+	// Story 6.3: Reanim 迁移完成
+	// 注意：旧版代码使用 SpriteComponent 和 GetPlantImagePath()
+	// 现在所有植物都使用 ReanimComponent，不再需要加载 sprite 图片
+	// SpriteComponent 已被移除，植物渲染完全由 ReanimComponent 处理
+
+	// 创建实体
+	entityID := em.CreateEntity()
+
+	// Story 18.5: 添加植物标签组件（用于序列化时统一识别植物实体）
+	em.AddComponent(entityID, &components.PlantTagComponent{})
+
+	// 添加位置组件（使用世界坐标）
+	em.AddComponent(entityID, &components.PositionComponent{
+		X: worldCenterX,
+		Y: worldCenterY,
+	})
+
+	// 添加植物组件
+	em.AddComponent(entityID, &components.PlantComponent{
+		PlantType:       plantType,
+		GridRow:         row,
+		GridCol:         col,
+		AttackAnimState: components.AttackAnimIdle, // Story 10.3: 初始化为空闲状态
+		LastFiredFrame:  -1,                        // 初始化为 -1，表示还未发射过
+		BlinkTimer:      3.0,                       // Story 6.4: 初始化眨眼计时器为3秒
+	})
+
+	// 为向日葵添加特定组件
+	if plantType == components.PlantSunflower {
+		// 添加生命值组件
+		em.AddComponent(entityID, &components.HealthComponent{
+			CurrentHealth: config.SunflowerDefaultHealth,
+			MaxHealth:     config.SunflowerDefaultHealth,
+		})
+
+		// 添加行为组件
+		em.AddComponent(entityID, &components.BehaviorComponent{
+			Type: components.BehaviorSunflower,
+		})
+
+		// 添加计时器组件（首次生产周期为 7 秒）
+		em.AddComponent(entityID, &components.TimerComponent{
+			Name:        "sun_production",
+			TargetTime:  7.0,
+			CurrentTime: 0,
+			IsReady:     false,
+		})
+
+		// Story 6.3: 使用 ReanimComponent 替代 AnimationComponent
+		// 从 ResourceManager 获取向日葵的 Reanim 数据和部件图片
+		// 使用植物注册表查询 ReanimName，避免硬编码
+		reanimName := config.GetPlantReanimName(components.PlantSunflower)
+		reanimXML := rm.GetReanimXML(reanimName)
+		partImages := rm.GetReanimPartImages(reanimName)
+
+		if reanimXML == nil || partImages == nil {
+			return 0, fmt.Errorf("failed to load %s Reanim resources", reanimName)
+		}
+
+		// 添加 ReanimComponent
+		em.AddComponent(entityID, &components.ReanimComponent{
+			ReanimName: reanimName,
+			ReanimXML:  reanimXML,
+			PartImages: partImages,
+		})
+
+		// Story 13.8: 使用 PlayCombo API 播放默认动画
+		if err := rs.PlayCombo(entityID, "sunflower", ""); err != nil {
+			return 0, fmt.Errorf("failed to play SunFlower default animation: %w", err)
+		}
+		log.Printf("[PlantFactory] 向日葵 %d: 成功添加 ReanimComponent 并初始化动画", entityID)
+	}
+
+	// 为豌豆射手添加特定组件
+	if plantType == components.PlantPeashooter {
+		// 添加生命值组件
+		em.AddComponent(entityID, &components.HealthComponent{
+			CurrentHealth: config.PeashooterDefaultHealth,
+			MaxHealth:     config.PeashooterDefaultHealth,
+		})
+
+		// 添加植物组件（用于攻击动画状态管理）
+		em.AddComponent(entityID, &components.PlantComponent{
+			PlantType:       components.PlantPeashooter,
+			GridRow:         row,
+			GridCol:         col,
+			AttackAnimState: components.AttackAnimIdle,
+			LastFiredFrame:  -1, // 初始化为 -1，表示还未发射过
+		})
+
+		// 添加行为组件
+		em.AddComponent(entityID, &components.BehaviorComponent{
+			Type: components.BehaviorPeashooter,
+		})
+
+		// Story 13.6: 使用集中配置文件创建豌豆射手动画
+		// 从 ResourceManager 获取豌豆射手的 Reanim 数据和部件图片
+		// 使用植物注册表查询 ReanimName，避免硬编码
+		reanimName := config.GetPlantReanimName(components.PlantPeashooter)
+		reanimXML := rm.GetReanimXML(reanimName)
+		partImages := rm.GetReanimPartImages(reanimName)
+
+		if reanimXML == nil || partImages == nil {
+			return 0, fmt.Errorf("failed to load %s Reanim resources", reanimName)
+		}
+
+		// 添加基础的 ReanimComponent
+		em.AddComponent(entityID, &components.ReanimComponent{
+			ReanimName: reanimName,
+			ReanimXML:  reanimXML,
+			PartImages: partImages,
+		})
+
+		// Story 13.8: 使用 PlayCombo API 播放默认动画
+		// PlayCombo 会自动从 data/reanim_config.yaml 读取配置
+		if err := rs.PlayCombo(entityID, "peashootersingle", ""); err != nil {
+			return 0, fmt.Errorf("failed to play peashooter default animation: %w", err)
+		}
+
+		log.Printf("[PlantFactory] 豌豆射手 %d: 成功使用集中配置文件创建动画", entityID)
+	}
+
+	// Story 10.7: 为植物添加阴影组件
+	// 根据植物类型从统一注册表获取ID作为阴影配置键
+	shadowEntityType := config.PlantTypeToID(plantType)
+
+	shadowSize := config.GetShadowSize(shadowEntityType)
+	em.AddComponent(entityID, &components.ShadowComponent{
+		Width:   shadowSize.Width,
+		Height:  shadowSize.Height,
+		Alpha:   config.DefaultShadowAlpha,
+		OffsetY: 0,
+	})
+
+	return entityID, nil
+}
+
+// NewWallnutEntity 创建坚果墙实体
+// 坚果墙是一种高生命值的防御植物，没有攻击能力，根据生命值百分比显示不同的外观状态
+//
+// 参数:
+//   - em: 实体管理器
+//   - rm: 资源管理器（用于加载坚果墙图像和 Reanim 资源）
+//   - gs: 游戏状态（用于获取摄像机位置）
+//   - rs: Reanim 系统（用于初始化动画）
+//   - col: 网格列索引 (0-8)
+//   - row: 网格行索引 (0-4)
+//
+// 返回:
+//   - ecs.EntityID: 创建的坚果墙实体ID，如果失败返回 0
+//   - error: 如果创建失败返回错误信息
+func NewWallnutEntity(em *ecs.EntityManager, rm ResourceLoader, gs *game.GameState, rs ReanimSystemInterface, col, row int) (ecs.EntityID, error) {
+	// 计算植物位置坐标（使用世界坐标系统）
+	// Y 坐标 = 格子中心 + PlantOffsetY，使植物脚底对齐到格子底部
+	worldCenterX := config.GridWorldStartX + float64(col)*config.CellWidth + config.CellWidth/2
+	worldCenterY := config.GridWorldStartY + float64(row)*config.CellHeight + config.CellHeight/2 + config.PlantOffsetY
+
+	// 创建实体
+	entityID := em.CreateEntity()
+
+	// Story 18.5: 添加植物标签组件（用于序列化时统一识别植物实体）
+	em.AddComponent(entityID, &components.PlantTagComponent{})
+
+	// 添加位置组件（使用世界坐标）
+	em.AddComponent(entityID, &components.PositionComponent{
+		X: worldCenterX,
+		Y: worldCenterY,
+	})
+
+	// Story 6.3: 使用 ReanimComponent 替代 AnimationComponent
+	// 从 ResourceManager 获取坚果墙的 Reanim 数据和部件图片
+	// 使用植物注册表查询 ReanimName，避免硬编码
+	reanimName := config.GetPlantReanimName(components.PlantWallnut)
+	reanimXML := rm.GetReanimXML(reanimName)
+	partImages := rm.GetReanimPartImages(reanimName)
+
+	if reanimXML == nil || partImages == nil {
+		return 0, fmt.Errorf("failed to load %s Reanim resources", reanimName)
+	}
+
+	// Clone partImages to avoid shared state issues when modifying images (e.g. cracking)
+	clonedPartImages := make(map[string]*ebiten.Image, len(partImages))
+	for k, v := range partImages {
+		clonedPartImages[k] = v
+	}
+
+	// 添加植物组件（用于碰撞检测和网格位置追踪）
+	em.AddComponent(entityID, &components.PlantComponent{
+		PlantType:       components.PlantWallnut,
+		GridRow:         row,
+		GridCol:         col,
+		AttackAnimState: components.AttackAnimIdle, // Story 10.3: 初始化为空闲状态
+	})
+
+	// 添加生命值组件（坚果墙拥有极高的生命值）
+	em.AddComponent(entityID, &components.HealthComponent{
+		CurrentHealth: config.WallnutDefaultHealth, // 4000
+		MaxHealth:     config.WallnutDefaultHealth,
+	})
+
+	// 添加行为组件（坚果墙行为）
+	em.AddComponent(entityID, &components.BehaviorComponent{
+		Type: components.BehaviorWallnut,
+	})
+
+	// 添加 ReanimComponent
+	em.AddComponent(entityID, &components.ReanimComponent{
+		ReanimName: reanimName,
+		ReanimXML:  reanimXML,
+		PartImages: clonedPartImages,
+	})
+
+	// Story 13.8: 使用 PlayCombo API 播放默认动画
+	if err := rs.PlayCombo(entityID, "wallnut", ""); err != nil {
+		return 0, fmt.Errorf("failed to play WallNut default animation: %w", err)
+	}
+
+	// 添加碰撞组件（用于僵尸碰撞检测）
+	// 坚果墙的碰撞盒与普通植物类似
+	em.AddComponent(entityID, &components.CollisionComponent{
+		Width:  config.CellWidth * 0.8,  // 碰撞盒宽度略小于格子宽度
+		Height: config.CellHeight * 0.8, // 碰撞盒高度略小于格子高度
+	})
+
+	// Story 10.7: 为坚果墙添加阴影组件
+	shadowSize := config.GetShadowSize("wallnut")
+	em.AddComponent(entityID, &components.ShadowComponent{
+		Width:   shadowSize.Width,
+		Height:  shadowSize.Height,
+		Alpha:   config.DefaultShadowAlpha,
+		OffsetY: 0,
+	})
+
+	return entityID, nil
+}
+
+// NewCherryBombEntity 创建樱桃炸弹实体
+// 樱桃炸弹是一种高成本的一次性爆炸植物，种植后经过引信时间（1.5秒）后爆炸，
+// 对以自身为中心的3x3范围内的所有僵尸造成1800点伤害（足以秒杀所有僵尸）
+//
+// 参数:
+//   - em: 实体管理器
+//   - rm: 资源管理器（用于加载樱桃炸弹图像和 Reanim 资源）
+//   - gs: 游戏状态（用于获取摄像机位置）
+//   - col: 网格列索引 (0-8)
+//   - row: 网格行索引 (0-4)
+//
+// 返回:
+//   - ecs.EntityID: 创建的樱桃炸弹实体ID，如果失败返回 0
+//   - error: 如果创建失败返回错误信息
+//
+// Story 14.3: Epic 14 - 移除 ReanimSystem 依赖，动画通过 AnimationCommand 组件初始化
+func NewCherryBombEntity(em *ecs.EntityManager, rm ResourceLoader, gs *game.GameState, col, row int) (ecs.EntityID, error) {
+	// 计算植物位置坐标（使用世界坐标系统）
+	// Y 坐标 = 格子中心 + PlantOffsetY，使植物脚底对齐到格子底部
+	worldCenterX := config.GridWorldStartX + float64(col)*config.CellWidth + config.CellWidth/2
+	worldCenterY := config.GridWorldStartY + float64(row)*config.CellHeight + config.CellHeight/2 + config.PlantOffsetY
+
+	// 创建实体
+	entityID := em.CreateEntity()
+
+	// Story 18.5: 添加植物标签组件（用于序列化时统一识别植物实体）
+	em.AddComponent(entityID, &components.PlantTagComponent{})
+
+	// 添加位置组件（使用世界坐标）
+	em.AddComponent(entityID, &components.PositionComponent{
+		X: worldCenterX,
+		Y: worldCenterY,
+	})
+
+	// 从 ResourceManager 获取樱桃炸弹的 Reanim 数据和部件图片
+	// 使用植物注册表查询 ReanimName，避免硬编码
+	reanimName := config.GetPlantReanimName(components.PlantCherryBomb)
+	reanimXML := rm.GetReanimXML(reanimName)
+	partImages := rm.GetReanimPartImages(reanimName)
+
+	if reanimXML == nil || partImages == nil {
+		return 0, fmt.Errorf("failed to load %s Reanim resources", reanimName)
+	}
+
+	// 添加 ReanimComponent
+	em.AddComponent(entityID, &components.ReanimComponent{
+		ReanimName: reanimName,
+		ReanimXML:  reanimXML,
+		PartImages: partImages,
+	})
+
+	// ✅ Epic 14: 使用 AnimationCommand 触发动画（替代直接调用 ReanimSystem）
+	// 添加动画命令组件，让 ReanimSystem 在 Update 中处理
+	// 樱桃炸弹播放 anim_idle（引信动画）
+	ecs.AddComponent(em, entityID, &components.AnimationCommandComponent{
+		AnimationName: "anim_idle",
+		Processed:     false,
+	})
+	log.Printf("[PlantFactory] 樱桃炸弹 %d: 成功添加 ReanimComponent 并初始化引信动画", entityID)
+
+	// 添加植物组件（用于碰撞检测和网格位置追踪）
+	em.AddComponent(entityID, &components.PlantComponent{
+		PlantType:       components.PlantCherryBomb,
+		GridRow:         row,
+		GridCol:         col,
+		AttackAnimState: components.AttackAnimIdle, // Story 10.3: 初始化为空闲状态
+	})
+
+	// 添加行为组件（樱桃炸弹行为）
+	em.AddComponent(entityID, &components.BehaviorComponent{
+		Type: components.BehaviorCherryBomb,
+	})
+
+	// 添加引信计时器组件（1.5秒后爆炸）
+	em.AddComponent(entityID, &components.TimerComponent{
+		Name:        "fuse_timer",
+		TargetTime:  config.CherryBombFuseTime, // 1.5秒
+		CurrentTime: 0,
+		IsReady:     false,
+	})
+
+	// 添加碰撞组件（用于后续爆炸范围检测）
+	// 碰撞盒大小与格子大小一致
+	em.AddComponent(entityID, &components.CollisionComponent{
+		Width:  config.CellWidth,
+		Height: config.CellHeight,
+	})
+
+	// Story 10.7: 为樱桃炸弹添加阴影组件
+	shadowSize := config.GetShadowSize("cherrybomb")
+	em.AddComponent(entityID, &components.ShadowComponent{
+		Width:   shadowSize.Width,
+		Height:  shadowSize.Height,
+		Alpha:   config.DefaultShadowAlpha,
+		OffsetY: 0,
+	})
+
+	return entityID, nil
+}
+
+// NewPotatoMineEntity 创建土豆雷实体
+// 土豆雷是一种低成本的地雷植物，需要一定时间武装后才能触发爆炸
+//
+// 参数:
+//   - em: 实体管理器
+//   - rm: 资源管理器（用于加载土豆雷图像和 Reanim 资源）
+//   - gs: 游戏状态
+//   - col: 网格列索引 (0-8)
+//   - row: 网格行索引 (0-4)
+//
+// 返回:
+//   - ecs.EntityID: 创建的土豆雷实体ID，如果失败返回 0
+//   - error: 如果创建失败返回错误信息
+func NewPotatoMineEntity(em *ecs.EntityManager, rm ResourceLoader, gs *game.GameState, col, row int) (ecs.EntityID, error) {
+	// 计算植物位置坐标（使用世界坐标系统）
+	// Y 坐标 = 格子中心 + PlantOffsetY，使植物脚底对齐到格子底部
+	worldCenterX := config.GridWorldStartX + float64(col)*config.CellWidth + config.CellWidth/2
+	worldCenterY := config.GridWorldStartY + float64(row)*config.CellHeight + config.CellHeight/2 + config.PlantOffsetY
+
+	// 创建实体
+	entityID := em.CreateEntity()
+
+	// Story 18.5: 添加植物标签组件（用于序列化时统一识别植物实体）
+	em.AddComponent(entityID, &components.PlantTagComponent{})
+
+	// 添加位置组件（使用世界坐标）
+	em.AddComponent(entityID, &components.PositionComponent{
+		X: worldCenterX,
+		Y: worldCenterY,
+	})
+
+	// 从 ResourceManager 获取土豆雷的 Reanim 数据和部件图片
+	// 使用植物注册表查询 ReanimName，避免硬编码
+	reanimName := config.GetPlantReanimName(components.PlantPotatoMine)
+	reanimXML := rm.GetReanimXML(reanimName)
+	partImages := rm.GetReanimPartImages(reanimName)
+
+	if reanimXML == nil || partImages == nil {
+		return 0, fmt.Errorf("failed to load %s Reanim resources", reanimName)
+	}
+
+	// 添加 ReanimComponent
+	em.AddComponent(entityID, &components.ReanimComponent{
+		ReanimName: reanimName,
+		ReanimXML:  reanimXML,
+		PartImages: partImages,
+	})
+
+	// 使用 AnimationCommand 触发默认动画（anim_idle）
+	// anim_idle = 刚种植，埋在地下（只显示泥土）
+	// anim_rise = 15秒后升起
+	// anim_armed = 升起完成，武装就绪等待爆炸
+	ecs.AddComponent(em, entityID, &components.AnimationCommandComponent{
+		UnitID:        "potatomine",
+		AnimationName: "anim_idle",
+		Processed:     false,
+	})
+	log.Printf("[PlantFactory] 土豆雷 %d: 成功添加 ReanimComponent 并初始化动画", entityID)
+
+	// 添加植物组件（用于碰撞检测和网格位置追踪）
+	em.AddComponent(entityID, &components.PlantComponent{
+		PlantType:       components.PlantPotatoMine,
+		GridRow:         row,
+		GridCol:         col,
+		AttackAnimState: components.AttackAnimIdle,
+	})
+
+	// 添加行为组件（土豆雷行为）
+	em.AddComponent(entityID, &components.BehaviorComponent{
+		Type: components.BehaviorPotatoMine,
+	})
+
+	// 添加生命值组件（用于被僵尸啃食时造成伤害）
+	em.AddComponent(entityID, &components.HealthComponent{
+		CurrentHealth: config.PotatoMineDefaultHealth,
+		MaxHealth:     config.PotatoMineDefaultHealth,
+	})
+
+	// 添加碰撞组件（用于后续爆炸范围检测）
+	em.AddComponent(entityID, &components.CollisionComponent{
+		Width:  config.CellWidth,
+		Height: config.CellHeight,
+	})
+
+	// 添加阴影组件
+	shadowSize := config.GetShadowSize("potatomine")
+	em.AddComponent(entityID, &components.ShadowComponent{
+		Width:   shadowSize.Width,
+		Height:  shadowSize.Height,
+		Alpha:   config.DefaultShadowAlpha,
+		OffsetY: 0,
+	})
+
+	return entityID, nil
+}
+
+// NewSnowPeaEntity 创建寒冰射手实体
+// Story 8.9: 寒冰射手是一种发射冰豌豆的攻击植物，命中僵尸后降低其移动速度
+//
+// 参数:
+//   - em: 实体管理器
+//   - rm: 资源管理器（用于加载寒冰射手图像和 Reanim 资源）
+//   - gs: 游戏状态（用于获取摄像机位置）
+//   - rs: Reanim 系统（用于初始化动画）
+//   - col: 网格列索引 (0-8)
+//   - row: 网格行索引 (0-4)
+//
+// 返回:
+//   - ecs.EntityID: 创建的寒冰射手实体ID，如果失败返回 0
+//   - error: 如果创建失败返回错误信息
+func NewSnowPeaEntity(em *ecs.EntityManager, rm ResourceLoader, gs *game.GameState, rs ReanimSystemInterface, col, row int) (ecs.EntityID, error) {
+	// 计算植物原点坐标（使用世界坐标系统）
+	worldCenterX := config.GridWorldStartX + float64(col)*config.CellWidth + config.CellWidth/2
+	worldCenterY := config.GridWorldStartY + float64(row)*config.CellHeight + config.CellHeight/2 + config.PlantOffsetY
+
+	// 创建实体
+	entityID := em.CreateEntity()
+
+	// Story 18.5: 添加植物标签组件（用于序列化时统一识别植物实体）
+	em.AddComponent(entityID, &components.PlantTagComponent{})
+
+	// 添加位置组件（使用世界坐标）
+	em.AddComponent(entityID, &components.PositionComponent{
+		X: worldCenterX,
+		Y: worldCenterY,
+	})
+
+	// 添加生命值组件（与豌豆射手相同）
+	em.AddComponent(entityID, &components.HealthComponent{
+		CurrentHealth: config.PeashooterDefaultHealth,
+		MaxHealth:     config.PeashooterDefaultHealth,
+	})
+
+	// 添加植物组件（用于攻击动画状态管理）
+	em.AddComponent(entityID, &components.PlantComponent{
+		PlantType:       components.PlantSnowPea,
+		GridRow:         row,
+		GridCol:         col,
+		AttackAnimState: components.AttackAnimIdle,
+		LastFiredFrame:  -1, // 初始化为 -1，表示还未发射过
+		BlinkTimer:      3.0, // 初始化眨眼计时器
+	})
+
+	// 添加行为组件（寒冰射手行为）
+	em.AddComponent(entityID, &components.BehaviorComponent{
+		Type: components.BehaviorSnowPea,
+	})
+
+	// 从 ResourceManager 获取寒冰射手的 Reanim 数据和部件图片
+	// 使用植物注册表查询 ReanimName，避免硬编码
+	reanimName := config.GetPlantReanimName(components.PlantSnowPea)
+	reanimXML := rm.GetReanimXML(reanimName)
+	partImages := rm.GetReanimPartImages(reanimName)
+
+	if reanimXML == nil || partImages == nil {
+		return 0, fmt.Errorf("failed to load %s Reanim resources", reanimName)
+	}
+
+	// 添加基础的 ReanimComponent
+	em.AddComponent(entityID, &components.ReanimComponent{
+		ReanimName: reanimName,
+		ReanimXML:  reanimXML,
+		PartImages: partImages,
+	})
+
+	// 使用 PlayCombo API 播放默认动画
+	// PlayCombo 会自动从 data/reanim_config.yaml 读取配置
+	if err := rs.PlayCombo(entityID, "snowpea", ""); err != nil {
+		return 0, fmt.Errorf("failed to play snowpea default animation: %w", err)
+	}
+
+	log.Printf("[PlantFactory] 寒冰射手 %d: 成功使用集中配置文件创建动画", entityID)
+
+	// 添加碰撞组件
+	em.AddComponent(entityID, &components.CollisionComponent{
+		Width:  config.CellWidth * 0.8,
+		Height: config.CellHeight * 0.8,
+	})
+
+	// 添加阴影组件
+	shadowSize := config.GetShadowSize("snowpea")
+	em.AddComponent(entityID, &components.ShadowComponent{
+		Width:   shadowSize.Width,
+		Height:  shadowSize.Height,
+		Alpha:   config.DefaultShadowAlpha,
+		OffsetY: 0,
+	})
+
+	return entityID, nil
+}
+
+// NewChomperEntity 创建大嘴花实体
+// Story 8.11: 大嘴花是一种秒杀类植物，吞噬后需要消化时间
+//
+// 参数:
+//   - em: 实体管理器
+//   - rm: 资源管理器（用于加载大嘴花图像和 Reanim 资源）
+//   - gs: 游戏状态
+//   - col: 网格列索引 (0-8)
+//   - row: 网格行索引 (0-4)
+//
+// 返回:
+//   - ecs.EntityID: 创建的大嘴花实体ID，如果失败返回 0
+//   - error: 如果创建失败返回错误信息
+func NewChomperEntity(em *ecs.EntityManager, rm ResourceLoader, gs *game.GameState, col, row int) (ecs.EntityID, error) {
+	// 计算植物原点坐标（使用世界坐标系统）
+	worldCenterX := config.GridWorldStartX + float64(col)*config.CellWidth + config.CellWidth/2
+	worldCenterY := config.GridWorldStartY + float64(row)*config.CellHeight + config.CellHeight/2 + config.PlantOffsetY
+
+	// 创建实体
+	entityID := em.CreateEntity()
+
+	// Story 18.5: 添加植物标签组件（用于序列化时统一识别植物实体）
+	em.AddComponent(entityID, &components.PlantTagComponent{})
+
+	// 添加位置组件（使用世界坐标）
+	em.AddComponent(entityID, &components.PositionComponent{
+		X: worldCenterX,
+		Y: worldCenterY,
+	})
+
+	// 添加生命值组件
+	em.AddComponent(entityID, &components.HealthComponent{
+		CurrentHealth: config.ChomperHealth,
+		MaxHealth:     config.ChomperHealth,
+	})
+
+	// 添加植物组件
+	em.AddComponent(entityID, &components.PlantComponent{
+		PlantType:       components.PlantChomper,
+		GridRow:         row,
+		GridCol:         col,
+		AttackAnimState: components.AttackAnimIdle,
+	})
+
+	// 添加大嘴花特有组件
+	em.AddComponent(entityID, &components.ChomperComponent{
+		State:          components.ChomperStateIdle,
+		TargetZombie:   0,
+		DigestTimer:    0,
+		AttackCooldown: 0,
+		DamageDealt:    false,
+	})
+
+	// 添加行为组件（大嘴花行为）
+	em.AddComponent(entityID, &components.BehaviorComponent{
+		Type: components.BehaviorChomper,
+	})
+
+	// 从 ResourceManager 获取大嘴花的 Reanim 数据和部件图片
+	// 使用植物注册表查询 ReanimName，避免硬编码
+	reanimName := config.GetPlantReanimName(components.PlantChomper)
+	reanimXML := rm.GetReanimXML(reanimName)
+	partImages := rm.GetReanimPartImages(reanimName)
+
+	if reanimXML == nil || partImages == nil {
+		return 0, fmt.Errorf("failed to load %s Reanim resources", reanimName)
+	}
+
+	// 添加 ReanimComponent
+	em.AddComponent(entityID, &components.ReanimComponent{
+		ReanimName: reanimName,
+		ReanimXML:  reanimXML,
+		PartImages: partImages,
+	})
+
+	// 使用 AnimationCommand 触发默认动画（anim_idle）
+	ecs.AddComponent(em, entityID, &components.AnimationCommandComponent{
+		UnitID:        "chomper",
+		AnimationName: "anim_idle",
+		Processed:     false,
+	})
+	log.Printf("[PlantFactory] 大嘴花 %d: 成功添加 ReanimComponent 并初始化动画", entityID)
+
+	// 添加碰撞组件
+	em.AddComponent(entityID, &components.CollisionComponent{
+		Width:  config.CellWidth * 0.8,
+		Height: config.CellHeight * 0.8,
+	})
+
+	// 添加阴影组件
+	shadowSize := config.GetShadowSize("chomper")
+	em.AddComponent(entityID, &components.ShadowComponent{
+		Width:   shadowSize.Width,
+		Height:  shadowSize.Height,
+		Alpha:   config.DefaultShadowAlpha,
+		OffsetY: 0,
+	})
+
+	return entityID, nil
+}
+
+// NewRepeaterEntity 创建双发射手实体
+// Story 8.12: 双发射手每次攻击发射2颗豌豆，攻击力翻倍
+//
+// 参数:
+//   - em: 实体管理器
+//   - rm: 资源管理器（用于加载双发射手图像和 Reanim 资源）
+//   - gs: 游戏状态
+//   - rs: Reanim 系统（用于初始化动画）
+//   - col: 网格列索引 (0-8)
+//   - row: 网格行索引 (0-4)
+//
+// 返回:
+//   - ecs.EntityID: 创建的双发射手实体ID，如果失败返回 0
+//   - error: 如果创建失败返回错误信息
+func NewRepeaterEntity(em *ecs.EntityManager, rm ResourceLoader, gs *game.GameState, rs ReanimSystemInterface, col, row int) (ecs.EntityID, error) {
+	// 计算植物原点坐标（使用世界坐标系统）
+	worldCenterX := config.GridWorldStartX + float64(col)*config.CellWidth + config.CellWidth/2
+	worldCenterY := config.GridWorldStartY + float64(row)*config.CellHeight + config.CellHeight/2 + config.PlantOffsetY
+
+	// 创建实体
+	entityID := em.CreateEntity()
+
+	// Story 18.5: 添加植物标签组件（用于序列化时统一识别植物实体）
+	em.AddComponent(entityID, &components.PlantTagComponent{})
+
+	// 添加位置组件（使用世界坐标）
+	em.AddComponent(entityID, &components.PositionComponent{
+		X: worldCenterX,
+		Y: worldCenterY,
+	})
+
+	// 添加生命值组件
+	em.AddComponent(entityID, &components.HealthComponent{
+		CurrentHealth: config.RepeaterHealth,
+		MaxHealth:     config.RepeaterHealth,
+	})
+
+	// 添加植物组件（用于攻击动画状态管理）
+	em.AddComponent(entityID, &components.PlantComponent{
+		PlantType:       components.PlantRepeater,
+		GridRow:         row,
+		GridCol:         col,
+		AttackAnimState: components.AttackAnimIdle,
+		LastFiredFrame:  -1, // 初始化为 -1，表示还未发射过
+		BlinkTimer:      3.0,
+	})
+
+	// 添加行为组件（双发射手行为）
+	em.AddComponent(entityID, &components.BehaviorComponent{
+		Type: components.BehaviorRepeater,
+	})
+
+	// 从 ResourceManager 获取双发射手的 Reanim 数据和部件图片
+	// 使用植物注册表查询 ReanimName，避免硬编码
+	reanimName := config.GetPlantReanimName(components.PlantRepeater)
+	reanimXML := rm.GetReanimXML(reanimName)
+	partImages := rm.GetReanimPartImages(reanimName)
+
+	if reanimXML == nil || partImages == nil {
+		return 0, fmt.Errorf("failed to load %s (Repeater) Reanim resources", reanimName)
+	}
+
+	// 添加基础的 ReanimComponent
+	em.AddComponent(entityID, &components.ReanimComponent{
+		ReanimName: reanimName,
+		ReanimXML:  reanimXML,
+		PartImages: partImages,
+	})
+
+	// 使用 PlayCombo API 播放默认动画
+	if err := rs.PlayCombo(entityID, "repeater", ""); err != nil {
+		return 0, fmt.Errorf("failed to play repeater default animation: %w", err)
+	}
+
+	log.Printf("[PlantFactory] 双发射手 %d: 成功使用集中配置文件创建动画", entityID)
+
+	// 添加碰撞组件
+	em.AddComponent(entityID, &components.CollisionComponent{
+		Width:  config.CellWidth * 0.8,
+		Height: config.CellHeight * 0.8,
+	})
+
+	// 添加阴影组件
+	shadowSize := config.GetShadowSize("repeater")
+	em.AddComponent(entityID, &components.ShadowComponent{
+		Width:   shadowSize.Width,
+		Height:  shadowSize.Height,
+		Alpha:   config.DefaultShadowAlpha,
+		OffsetY: 0,
+	})
+
+	return entityID, nil
+}
+
+// =============================================================================
+// Story 18.5: 植物工厂注册表
+// =============================================================================
+
+// PlantFactoryDeps 植物工厂依赖
+//
+// 封装植物工厂函数所需的所有依赖，避免工厂签名不统一的问题
+// 不需要的依赖可以传 nil（如樱桃炸弹不需要 ReanimSystem）
+type PlantFactoryDeps struct {
+	EntityManager  *ecs.EntityManager
+	ResourceLoader ResourceLoader
+	GameState      *game.GameState
+	ReanimSystem   ReanimSystemInterface // 可选，部分植物不需要
+}
+
+// PlantFactory 统一的植物工厂函数签名
+//
+// 所有植物工厂适配器函数都遵循相同的签名：
+//   - deps: 工厂依赖（包含 EntityManager、ResourceLoader 等）
+//   - col: 网格列索引 (0-8)
+//   - row: 网格行索引 (0-4)
+//
+// 返回创建的实体ID和可能的错误
+type PlantFactory func(deps PlantFactoryDeps, col, row int) (ecs.EntityID, error)
+
+// plantFactories 植物工厂注册表
+//
+// Story 18.5: 使用植物类型字符串作为键，映射到对应的工厂适配器函数
+// 新增植物类型只需在此表中添加一行，恢复逻辑无需修改
+var plantFactories = map[string]PlantFactory{
+	"sunflower":  newSunflowerFactory,
+	"peashooter": newPeashooterFactory,
+	"wallnut":    newWallnutFactory,
+	"cherrybomb": newCherryBombFactory,
+	"potatomine": newPotatoMineFactory,
+	"snowpea":    newSnowPeaFactory,
+	"chomper":    newChomperFactory,
+	"repeater":   newRepeaterFactory, // Story 8.12
+}
+
+// 适配器函数：将统一签名适配到各具体工厂函数
+
+func newSunflowerFactory(deps PlantFactoryDeps, col, row int) (ecs.EntityID, error) {
+	return NewPlantEntity(deps.EntityManager, deps.ResourceLoader, deps.GameState,
+		deps.ReanimSystem, components.PlantSunflower, col, row)
+}
+
+func newPeashooterFactory(deps PlantFactoryDeps, col, row int) (ecs.EntityID, error) {
+	return NewPlantEntity(deps.EntityManager, deps.ResourceLoader, deps.GameState,
+		deps.ReanimSystem, components.PlantPeashooter, col, row)
+}
+
+func newWallnutFactory(deps PlantFactoryDeps, col, row int) (ecs.EntityID, error) {
+	return NewWallnutEntity(deps.EntityManager, deps.ResourceLoader, deps.GameState,
+		deps.ReanimSystem, col, row)
+}
+
+func newCherryBombFactory(deps PlantFactoryDeps, col, row int) (ecs.EntityID, error) {
+	return NewCherryBombEntity(deps.EntityManager, deps.ResourceLoader, deps.GameState, col, row)
+}
+
+func newPotatoMineFactory(deps PlantFactoryDeps, col, row int) (ecs.EntityID, error) {
+	return NewPotatoMineEntity(deps.EntityManager, deps.ResourceLoader, deps.GameState, col, row)
+}
+
+func newSnowPeaFactory(deps PlantFactoryDeps, col, row int) (ecs.EntityID, error) {
+	return NewSnowPeaEntity(deps.EntityManager, deps.ResourceLoader, deps.GameState,
+		deps.ReanimSystem, col, row)
+}
+
+func newChomperFactory(deps PlantFactoryDeps, col, row int) (ecs.EntityID, error) {
+	return NewChomperEntity(deps.EntityManager, deps.ResourceLoader, deps.GameState, col, row)
+}
+
+func newRepeaterFactory(deps PlantFactoryDeps, col, row int) (ecs.EntityID, error) {
+	return NewRepeaterEntity(deps.EntityManager, deps.ResourceLoader, deps.GameState,
+		deps.ReanimSystem, col, row)
+}
+
+// GetPlantFactory 获取植物工厂函数
+//
+// Story 18.5: 通过植物类型字符串查找对应的工厂函数
+// 如果找不到对应的工厂函数，返回 nil 和 false
+//
+// 参数:
+//   - plantType: 植物类型字符串（如 "peashooter", "sunflower", "Sunflower"）
+//
+// 返回:
+//   - PlantFactory: 工厂函数，如果未找到返回 nil
+//   - bool: 是否找到对应的工厂函数
+func GetPlantFactory(plantType string) (PlantFactory, bool) {
+	// 使用小写进行匹配，兼容存档中保存的大写类型名称
+	factory, ok := plantFactories[strings.ToLower(plantType)]
+	return factory, ok
+}
+
+// GetDefaultPlantFactory 获取默认植物工厂函数
+//
+// Story 18.5: 当找不到对应的工厂函数时，返回豌豆射手工厂
+// 作为回退策略，确保旧版存档不会导致崩溃
+func GetDefaultPlantFactory() PlantFactory {
+	return newPeashooterFactory
+}

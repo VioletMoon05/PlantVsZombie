@@ -1,0 +1,61 @@
+# BMAD (local only)
+.bmad-core/
+.bmad-*/
+.windsurf
+.agent/workflows
+
+.claude/settings.local.json
+
+# 编译生成的二进制文件
+/pvz-go
+/pvz
+pvz-test
+coverage.out
+pvz-debug
+coverage_*.out
+pvz-game
+# 通用二进制文件规则 (排除特定扩展名和路径)
+**/verify_*
+!**/*.go
+!**/*.sh
+!**/*.md
+pvz_test
+
+# /assets
+# !/assets/config/
+
+/bin
+/.meta/screenshot
+main.go.backup
+.meta/v.md
+
+pvz.log
+*.log
+*.bak
+data/saves/
+
+/animation_showcase
+systems.test
+pvz
+pvz3
+scenes.test
+/verify_reward_animation
+/verify_reward_card
+/verify_reward_panel
+
+
+
+/verify_gameplay
+
+/*.out
+
+# 构建产物
+build/
+
+# 移动端构建时复制的资源（由 make prepare-mobile 生成）
+mobile/assets/
+mobile/data/
+
+.cache
+# Nimbalyst local data (not checked into version control)
+nimbalyst-local/

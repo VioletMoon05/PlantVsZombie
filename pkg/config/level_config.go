@@ -1,0 +1,579 @@
+package config
+
+import (
+	"fmt"
+
+	"github.com/gonewx/pvz/pkg/embedded"
+	"gopkg.in/yaml.v3"
+)
+
+// LevelConfig 关卡配置数据结构
+// 定义了关卡的基本信息和僵尸波次配置
+type LevelConfig struct {
+	ID          string       `yaml:"id"`          // 关卡ID，如 "1-1"
+	Name        string       `yaml:"name"`        // 关卡名称，如 "前院白天 1-1"
+	Description string       `yaml:"description"` // 关卡描述（可选）
+	Waves       []WaveConfig `yaml:"waves"`       // 僵尸波次配置列表
+
+	// Story 17.2: 关卡脚本格式升级
+	Flags     int    `yaml:"flags"`     // 本关卡的旗帜数量，默认从 waves 中的 isFlag 数量推断
+	SceneType string `yaml:"sceneType"` // 场景类型: day, night, pool, fog, roof, moon，默认 "day"
+	RowMax    int    `yaml:"rowMax"`    // 最大行数: 前院/屋顶 5 行，后院 6 行，默认 5
+
+	// Story 8.1 新增字段
+	OpeningType     string         `yaml:"openingType"`     // 开场类型：\"tutorial\", \"standard\", \"special\"，默认\"standard\"
+	EnabledLanes    []int          `yaml:"enabledLanes"`    // 启用的行列表，如 [1,2,3] 或 [3]，默认 [1,2,3,4,5]
+	AvailablePlants []string       `yaml:"availablePlants"` // 可用植物ID列表，如 [\"peashooter\", \"sunflower\"]，默认为空（所有已解锁植物）
+	SkipOpening     bool           `yaml:"skipOpening"`     // 是否跳过开场动画（调试用），默认 false
+	TutorialSteps   []TutorialStep `yaml:"tutorialSteps"`   // 教学步骤（可选，Story 8.2 使用）
+	SpecialRules    string         `yaml:"specialRules"`    // 特殊规则类型：\"bowling\", \"conveyor\"，默认为空
+	InitialSun      int            `yaml:"initialSun"`      // 初始阳光值，默认50（Story 8.2 QA改进）
+
+	// Story 8.3 新增字段
+	RewardPlant string `yaml:"rewardPlant"` // 完成本关后奖励的植物ID，如 "sunflower"，默认为空（无奖励）
+
+	// Story 8.2 QA改进：背景和草皮配置
+	BackgroundImage  string  `yaml:"backgroundImage"`  // 背景图片ID，如 \"IMAGE_BACKGROUND1_UNSODDED\"，默认 \"IMAGE_BACKGROUND1\"
+	SodRowImage      string  `yaml:"sodRowImage"`      // 草皮叠加图片ID，如 \"IMAGE_SOD1ROW\"，空表示无草皮
+	SodRowImageAnim  string  `yaml:"sodRowImageAnim"`  // 动画阶段草皮图片ID（如\"IMAGE_SOD3ROW\"），空表示使用SodRowImage
+	ShowSoddingAnim  bool    `yaml:"showSoddingAnim"`  // 是否播放铺草皮动画，默认 false
+	SoddingAnimDelay float64 `yaml:"soddingAnimDelay"` // 铺草皮动画延迟（秒），默认 0
+
+	// Story 11.2：关卡进度条配置
+	FlagWaves []int `yaml:"flagWaves"` // 旗帜波次索引列表（从0开始），如 [9, 19] 表示第10波和第20波有旗帜，默认为空
+
+	// Story 11.4：铺草皮粒子特效配置
+	SodRollAnimation bool  `yaml:"sodRollAnimation"` // 是否启用铺草皮动画，默认 false
+	SodRollParticles bool  `yaml:"sodRollParticles"` // 是否启用土粒飞溅特效，默认 false
+	SoddingAnimLanes []int `yaml:"soddingAnimLanes"` // 指定播放动画的行列表（如 [2,4]），空表示所有启用的行
+	PreSoddedLanes   []int `yaml:"preSoddedLanes"`   // 预先渲染草皮的行列表（如 [3]），初始化时直接显示草皮
+
+	// Story 8.6 新增字段
+	UnlockTools []string `yaml:"unlockTools"` // 完成本关解锁的工具列表，如 ["shovel"]，默认为空
+
+	// Story 8.7 新增字段：僵尸行转换模式
+	// 取值："instant" (瞬间) 或 "gradual" (渐变)，默认 "instant"
+	//
+	// 控制僵尸从非有效行转移到目标有效行时的转换方式：
+	//   - "instant": 瞬间模式 - 僵尸立即调整Y坐标到目标行（无动画）
+	//   - "gradual": 渐变模式 - 僵尸通过Y轴速度平滑移动到目标行（约3秒）
+	//
+	// 适用场景：
+	//   - "instant": 标准关卡（推荐）
+	//   - "gradual": 需要视觉过渡效果的特殊关卡
+	LaneTransitionMode string `yaml:"laneTransitionMode"`
+
+	// Story 8.3.1 新增字段：预览僵尸数量配置
+	// 开场动画中展示的预览僵尸数量，可选配置
+	// 如果为 0（未配置），则根据关卡难度自动计算：
+	//   - 简单关卡（≤2波）：3 只预览僵尸
+	//   - 中等关卡（3-5波）：5 只预览僵尸
+	//   - 困难关卡（>5波）：8 只预览僵尸
+	PreviewZombieCount int `yaml:"previewZombieCount"`
+
+	// ShowReadySetPlant 是否播放 "Ready Set Plant" 提示动画
+	// 原版设计：只在 level 1-3 播放（玩家首次进入全3行草地关卡时的引导）
+	// 默认 false
+	ShowReadySetPlant bool `yaml:"showReadySetPlant"`
+
+	// Story 19.4: 预设植物配置
+	// 关卡加载时自动生成的植物��表（如铲子教学关卡中的预设豌豆射手）
+	PresetPlants []PresetPlant `yaml:"presetPlants"`
+
+	// Story 19.5: 传送带配置
+	// 传送带系统参数（保龄球关卡等）
+	ConveyorBelt *ConveyorBeltConfig `yaml:"conveyorBelt"`
+
+	// FirstWaveDelay 首波僵尸延迟时间（秒）
+	// 默认值：首次游戏 20 秒，非首次游戏 6 秒
+	// 设置为 0 表示立即开始（传送带关卡等特殊关卡）
+	// 设置为 -1 表示使用默认值（不覆盖）
+	FirstWaveDelay *float64 `yaml:"firstWaveDelay"`
+
+	// Story 8.9: 僵尸池配置
+	// 定义关卡中可出现的僵尸类型，用于 ExtraPoints 波次类型的动态僵尸分配
+	// 如 ["zombie", "conehead", "polevaulter"]
+	ZombiePool []string `yaml:"zombiePool"`
+
+	// Story 8.12: 选卡系统配置
+	// 是否启用选卡界面（1-8 及以后的关卡使用）
+	// 启用后：镜头右移预览僵尸 → 进入选卡界面 → 点击"一起摇滚吧!" → 镜头左移 → 开始游戏
+	// 禁用时（默认）：使用 AvailablePlants 固定植物列表
+	EnableSeedSelection bool `yaml:"enableSeedSelection"`
+
+	// Story 8.13: 奖励面板主菜单按钮配置
+	// 是否在奖励面板上显示主菜单按钮，默认为 true
+	// 教学关卡（1-1、1-2）设置为 false，避免玩家过早跳出教学流程
+	// 使用指针类型以区分"未设置"（nil → 默认 true）和"显式设置为 false"
+	ShowMainMenuButton *bool `yaml:"showMainMenuButton"`
+
+	// Story 8.14: 奖励类型扩展
+	// 奖励类型: "plant"（默认）、"tool"、"note"
+	// - "plant": 植物奖励（如向日葵、双发射手）
+	// - "tool": 工具奖励（如铲子）
+	// - "note": 僵尸来信奖励（如 Level 1-9 的预告信）
+	RewardType string `yaml:"rewardType"`
+
+	// RewardNote 来信ID（当 RewardType 为 "note" 时使用）
+	// 对应 ZombieNote{N}.png 中的后缀，如 "zombienote1" 对应 ZombieNote1.png
+	RewardNote string `yaml:"rewardNote"`
+}
+
+// PresetPlant 预设植物配置（Story 19.4）
+// 定义关卡加载时自动生成的植物
+type PresetPlant struct {
+	Type string `yaml:"type"` // 植物类型，如 "peashooter"
+	Row  int    `yaml:"row"`  // 行号 (1-based，1-5)
+	Col  int    `yaml:"col"`  // 列号 (1-based，1-9)
+}
+
+// ConveyorBeltConfig 传送带配置（Story 19.5）
+// 定义传送带系统的参数
+type ConveyorBeltConfig struct {
+	Enabled            bool            `yaml:"enabled"`            // 是否启用传送带
+	Capacity           int             `yaml:"capacity"`           // 传送带容量（默认 10）
+	CardPool           []CardPoolEntry `yaml:"cardPool"`           // 卡片池配置
+	GenerationInterval float64         `yaml:"generationInterval"` // 卡片生成间隔（秒，默认 3.0）
+	CardWidth          float64         `yaml:"cardWidth"`          // 卡片宽度（像素），可选，默认使用 ConveyorCardScale 计算
+	CardHeight         float64         `yaml:"cardHeight"`         // 卡片高度（像素），可选，默认使用 ConveyorCardScale 计算
+
+	// Story 19.12: 动态调节系统配置
+	PhaseConfigs      []PhaseConfig            `yaml:"phaseConfigs"`      // 各阶段配置
+	DynamicAdjustment *DynamicAdjustmentConfig `yaml:"dynamicAdjustment"` // 动态调节参数
+}
+
+// PhaseConfig 阶段配置（Story 19.12）
+// 定义各阶段的爆炸坚果权重和生成间隔
+type PhaseConfig struct {
+	ProgressThreshold float64 `yaml:"progressThreshold"` // 进度阈值（0.0-1.0）
+	ExplodeNutWeight  int     `yaml:"explodeNutWeight"`  // 爆炸坚果权重（0-100）
+	IntervalMin       float64 `yaml:"intervalMin"`       // 最小生成间隔（秒）
+	IntervalMax       float64 `yaml:"intervalMax"`       // 最大生成间隔（秒）
+}
+
+// DynamicAdjustmentConfig 动态调节配置（Story 19.12）
+// 定义空带保底、满带降频、危机保底等参数
+type DynamicAdjustmentConfig struct {
+	EmptyBeltThreshold         float64 `yaml:"emptyBeltThreshold"`         // 空带保底阈值（秒），默认 3.0
+	FullBeltThreshold          float64 `yaml:"fullBeltThreshold"`          // 满带降频阈值（秒），默认 8.0
+	FullBeltThrottleMultiplier float64 `yaml:"fullBeltThrottleMultiplier"` // 降频倍率，默认 1.5
+	CrisisExplodeNutCooldown   float64 `yaml:"crisisExplodeNutCooldown"`   // 危机爆炸坚果冷却（秒），默认 5.0
+	CrisisZombieCount          int     `yaml:"crisisZombieCount"`          // 危机检测僵尸数量，默认 2
+	CrisisDistanceThreshold    float64 `yaml:"crisisDistanceThreshold"`    // 危机检测距离阈值（像素），默认 300
+}
+
+// CardPoolEntry 卡片池条目（Story 19.5）
+// 定义卡片类型和生成权重
+type CardPoolEntry struct {
+	Type   string `yaml:"type"`   // 卡片类型: "wallnut_bowling", "explode_o_nut"
+	Weight int    `yaml:"weight"` // 权重值（越大越容易生成）
+}
+
+// TutorialStep 教学步骤配置（Story 8.2）
+// 定义教学引导的触发条件、文本键和触发动作
+type TutorialStep struct {
+	Trigger      string        `yaml:"trigger"`      // 触发条件："gameStart", "sunClicked", "enoughSun", "seedClicked", "plantPlaced", "zombieSpawned"
+	TextKey      string        `yaml:"textKey"`      // LawnStrings.txt 中的文本键（如 "ADVICE_CLICK_ON_SUN"）
+	Action       string        `yaml:"action"`       // 触发动作："waitForSunClick", "waitForEnoughSun", "waitForSeedClick", "waitForPlantPlaced", "waitForZombieSpawn", "waitForLevelEnd"
+	ZombieSpawns []ZombieSpawn `yaml:"zombieSpawns"` // 可选：该步骤触发时生成的僵尸（教学关卡专用）
+}
+
+// WaveConfig 单个僵尸波次配置
+// 定义了僵尸波次的触发条件和生成的僵尸列表
+// Story 8.6 扩展：支持旗帜波次和混合僵尸生成
+// Story 17.2 扩展：支持波次编号、类型和额外点数
+// Story 17.6: 波次计时由 WaveTimingSystem 自动管理，不再需要 delay 字段
+type WaveConfig struct {
+	IsFlag     bool          `yaml:"isFlag"`     // 是否为旗帜波次（Story 8.6）
+	FlagIndex  int           `yaml:"flagIndex"`  // 旗帜索引（第几面旗帜），从1开始（Story 8.6）
+	Zombies    []ZombieGroup `yaml:"zombies"`    // 本波次要生成的僵尸组列表（Story 8.6 使用 ZombieGroup）
+	OldZombies []ZombieSpawn `yaml:"oldZombies"` // 兼容旧格式：单个僵尸生成配置（已废弃，向后兼容）
+
+	// Story 17.2: 新增波次配置字段
+	WaveNum         int    `yaml:"waveNum"`         // 当前波次编号（从 1 开始），默认从 slice 索引 +1 推断
+	Type            string `yaml:"type"`            // 波次类型: "Fixed", "ExtraPoints", "Final"，默认从 isFlag 推断
+	ExtraPoints     int    `yaml:"extraPoints"`     // 额外点数（用于动态点数分配关卡，仅 Type="ExtraPoints" 时有效）
+	LaneRestriction []int  `yaml:"laneRestriction"` // 行限制（可选，指定僵尸必须出现的行）
+}
+
+// ZombieGroup 僵尸组配置（Story 8.6 新增）
+// 支持随机行选择和逐个生成
+type ZombieGroup struct {
+	Type          string  `yaml:"type"`          // 僵尸类型："basic", "conehead", "buckethead"
+	Lanes         []int   `yaml:"lanes"`         // 可出现的行列表（随机选择），如 [2,3,4]
+	Count         int     `yaml:"count"`         // 数量
+	SpawnInterval float64 `yaml:"spawnInterval"` // 生成间隔（秒），逐个生成
+}
+
+// ZombieSpawn 单个僵尸生成配置（旧格式，向后兼容）
+// 定义了僵尸的类型、出现行数和生成数量
+type ZombieSpawn struct {
+	Type  string `yaml:"type"`  // 僵尸类型："basic", "conehead", "buckethead"
+	Lane  int    `yaml:"lane"`  // 僵尸出现的行（1-5，对应游戏界面的5行）
+	Count int    `yaml:"count"` // 生成数量
+}
+
+// LevelConfigExists 检查指定关卡的配置文件是否存在
+// 参数：
+//
+//	levelID - 关卡ID，如 "1-1", "2-5"
+//
+// 返回：
+//
+//	bool - 如果关卡配置文件存在返回 true，否则返回 false
+func LevelConfigExists(levelID string) bool {
+	filepath := fmt.Sprintf("data/levels/level-%s.yaml", levelID)
+	return embedded.Exists(filepath)
+}
+
+// LoadLevelConfig 从YAML文件加载关卡配置
+// 参数：
+//
+//	filepath - 关卡配置文件的路径（相对或绝对路径）
+//
+// 返回：
+//
+//	*LevelConfig - 解析后的关卡配置对象
+//	error - 如果文件读取或解析失败，返回错误信息
+func LoadLevelConfig(filepath string) (*LevelConfig, error) {
+	// 从 embedded FS 读取文件内容
+	data, err := embedded.ReadFile(filepath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read level config file %s: %w", filepath, err)
+	}
+
+	// 解析YAML数据
+	var levelConfig LevelConfig
+	if err := yaml.Unmarshal(data, &levelConfig); err != nil {
+		return nil, fmt.Errorf("failed to parse level config YAML from %s: %w", filepath, err)
+	}
+
+	// 应用默认值（向后兼容性）
+	applyDefaults(&levelConfig)
+
+	// 验证必填字段
+	if err := validateLevelConfig(&levelConfig); err != nil {
+		return nil, fmt.Errorf("invalid level config in %s: %w", filepath, err)
+	}
+
+	return &levelConfig, nil
+}
+
+// applyDefaults 为 LevelConfig 中缺失的可选字段设置默认值
+// 确保向后兼容性（旧配置文件可正常加载）
+func applyDefaults(config *LevelConfig) {
+	// 如果 EnabledLanes 为空，设置为所有5行
+	if len(config.EnabledLanes) == 0 {
+		config.EnabledLanes = []int{1, 2, 3, 4, 5}
+	}
+
+	// 如果 OpeningType 为空，设置为标准开场
+	if config.OpeningType == "" {
+		config.OpeningType = "standard"
+	}
+
+	// 如果 InitialSun 为0（未配置），设置为50（原版默认值）
+	// 注意：保龄球关卡（specialRules == "bowling"）和传送带关卡（specialRules == "conveyor"）
+	// 有意设置 InitialSun 为 0，不应覆盖
+	if config.InitialSun == 0 && config.SpecialRules != "bowling" && config.SpecialRules != "conveyor" {
+		config.InitialSun = 50
+	}
+
+	// Story 8.2 QA改进：背景和草皮默认值
+	// 如果 BackgroundImage 为空，设置为标准背景
+	if config.BackgroundImage == "" {
+		config.BackgroundImage = "IMAGE_BACKGROUND1"
+	}
+
+	// Story 17.2: 新字段默认值
+	// SceneType 默认 "day"
+	if config.SceneType == "" {
+		config.SceneType = "day"
+	}
+
+	// RowMax 默认 5
+	if config.RowMax == 0 {
+		config.RowMax = 5
+	}
+
+	// Flags 默认从 waves 中的 isFlag 数量推断
+	if config.Flags == 0 {
+		flagCount := 0
+		for _, wave := range config.Waves {
+			if wave.IsFlag {
+				flagCount++
+			}
+		}
+		config.Flags = flagCount
+	}
+
+	// FlagWaves 默认从 waves 中的 isFlag 字段推断
+	// Story 11.5 修复：确保旗帜位置正确显示在进度条上
+	if len(config.FlagWaves) == 0 {
+		for i, wave := range config.Waves {
+			if wave.IsFlag {
+				config.FlagWaves = append(config.FlagWaves, i)
+			}
+		}
+	}
+
+	// 为每个 wave 应用默认值
+	for i := range config.Waves {
+		wave := &config.Waves[i]
+
+		// WaveNum 默认从 slice 索引 +1 推断
+		if wave.WaveNum == 0 {
+			wave.WaveNum = i + 1
+		}
+
+		// Type 默认从 isFlag 字段推断
+		if wave.Type == "" {
+			if wave.IsFlag {
+				wave.Type = "Final"
+			} else {
+				wave.Type = "Fixed"
+			}
+		}
+	}
+
+	// AvailablePlants、TutorialSteps、SpecialRules、SodRowImage 默认为空值（nil/空字符串），无需处理
+	// SkipOpening 默认为 false（bool 零值），无需处理
+
+	// Story 8.13: ShowMainMenuButton 默认为 true
+	if config.ShowMainMenuButton == nil {
+		defaultTrue := true
+		config.ShowMainMenuButton = &defaultTrue
+	}
+
+	// Story 8.14: RewardType 默认为 "plant"
+	if config.RewardType == "" {
+		config.RewardType = "plant"
+	}
+}
+
+// validateLevelConfig 验证关卡配置的完整性和合法性
+func validateLevelConfig(config *LevelConfig) error {
+	// 验证关卡ID
+	if config.ID == "" {
+		return fmt.Errorf("level ID is required")
+	}
+
+	// 验证关卡名称
+	if config.Name == "" {
+		return fmt.Errorf("level name is required")
+	}
+
+	// Story 17.2: 验证新字段
+	// 验证 Flags（必须 >= 0）
+	if config.Flags < 0 {
+		return fmt.Errorf("flags must be >= 0, got %d", config.Flags)
+	}
+
+	// 验证 SceneType（必须是有效值或空）
+	validSceneTypes := map[string]bool{
+		"day":   true,
+		"night": true,
+		"pool":  true,
+		"fog":   true,
+		"roof":  true,
+		"moon":  true,
+	}
+	if config.SceneType != "" && !validSceneTypes[config.SceneType] {
+		return fmt.Errorf("sceneType must be one of: day, night, pool, fog, roof, moon, got %q", config.SceneType)
+	}
+
+	// 验证 RowMax（必须在 5-6 范围内或为 0 表示使用默认值）
+	if config.RowMax != 0 && (config.RowMax < 5 || config.RowMax > 6) {
+		return fmt.Errorf("rowMax must be 5 or 6, got %d", config.RowMax)
+	}
+
+	// 验证波次配置
+	if len(config.Waves) == 0 {
+		return fmt.Errorf("at least one wave is required")
+	}
+
+	// Story 17.2: 波次类型有效值
+	validWaveTypes := map[string]bool{
+		"Fixed":       true,
+		"ExtraPoints": true,
+		"Final":       true,
+	}
+
+	// 验证每个波次的配置
+	for i, wave := range config.Waves {
+		// Story 17.2: 验证波次新字段
+		// 验证 WaveNum（如果指定，必须 > 0）
+		if wave.WaveNum < 0 {
+			return fmt.Errorf("wave %d: waveNum must be >= 0, got %d", i, wave.WaveNum)
+		}
+
+		// 验证 Type（必须是有效值或空）
+		if wave.Type != "" && !validWaveTypes[wave.Type] {
+			return fmt.Errorf("wave %d: type must be one of: Fixed, ExtraPoints, Final, got %q", i, wave.Type)
+		}
+
+		// 验证 ExtraPoints（在 Type="ExtraPoints", "Fixed" 或 "Final" 时允许非零值）
+		// Story 8.9: Fixed 类型支持混合模式 - 固定僵尸 + 额外点数动态分配
+		// Story 18.4: Final 类型也支持 extraPoints
+		if wave.ExtraPoints != 0 && wave.Type != "ExtraPoints" && wave.Type != "Fixed" && wave.Type != "Final" {
+			return fmt.Errorf("wave %d: extraPoints can only be set when type is 'ExtraPoints', 'Fixed', or 'Final', got type %q with extraPoints %d", i, wave.Type, wave.ExtraPoints)
+		}
+
+		// 验证 ExtraPoints（必须 >= 0）
+		if wave.ExtraPoints < 0 {
+			return fmt.Errorf("wave %d: extraPoints must be >= 0, got %d", i, wave.ExtraPoints)
+		}
+
+		// 验证 LaneRestriction（如果配置了，所有值必须在 1-6 范围内，考虑后院 6 行）
+		for j, lane := range wave.LaneRestriction {
+			maxLane := 5
+			if config.RowMax == 6 {
+				maxLane = 6
+			}
+			if lane < 1 || lane > maxLane {
+				return fmt.Errorf("wave %d: laneRestriction[%d] must be between 1 and %d, got %d", i, j, maxLane, lane)
+			}
+		}
+
+		// Story 8.6: 支持 ZombieGroup 和旧格式 ZombieSpawn
+		// Story 8.9: ExtraPoints 类型的波次允许空 zombies（僵尸由点数动态分配）
+		if len(wave.Zombies) == 0 && len(wave.OldZombies) == 0 && wave.Type != "ExtraPoints" {
+			return fmt.Errorf("wave %d: at least one zombie group or spawn is required", i)
+		}
+
+		// 获取最大行数限制（用于验证僵尸行）
+		maxLane := 5
+		if config.RowMax == 6 {
+			maxLane = 6
+		}
+
+		// 验证新格式 ZombieGroup
+		for j, zombieGroup := range wave.Zombies {
+			if zombieGroup.Type == "" {
+				return fmt.Errorf("wave %d, zombie group %d: type is required", i, j)
+			}
+
+			if len(zombieGroup.Lanes) == 0 {
+				return fmt.Errorf("wave %d, zombie group %d: at least one lane is required", i, j)
+			}
+
+			// 验证所有 lanes 必须在有效范围内
+			for k, lane := range zombieGroup.Lanes {
+				if lane < 1 || lane > maxLane {
+					return fmt.Errorf("wave %d, zombie group %d, lane %d: lane must be between 1 and %d, got %d", i, j, k, maxLane, lane)
+				}
+			}
+
+			if zombieGroup.Count < 1 {
+				return fmt.Errorf("wave %d, zombie group %d: count must be at least 1, got %d", i, j, zombieGroup.Count)
+			}
+
+			if zombieGroup.SpawnInterval < 0 {
+				return fmt.Errorf("wave %d, zombie group %d: spawnInterval cannot be negative", i, j)
+			}
+		}
+
+		// 验证旧格式 ZombieSpawn（向后兼容）
+		for j, zombie := range wave.OldZombies {
+			if zombie.Type == "" {
+				return fmt.Errorf("wave %d, old zombie %d: type is required", i, j)
+			}
+
+			if zombie.Lane < 1 || zombie.Lane > maxLane {
+				return fmt.Errorf("wave %d, old zombie %d: lane must be between 1 and %d, got %d", i, j, maxLane, zombie.Lane)
+			}
+
+			if zombie.Count < 1 {
+				return fmt.Errorf("wave %d, old zombie %d: count must be at least 1, got %d", i, j, zombie.Count)
+			}
+		}
+
+		// 验证旗帜波次配置
+		if wave.IsFlag && wave.FlagIndex < 1 {
+			return fmt.Errorf("wave %d: flagIndex must be at least 1 for flag waves", i)
+		}
+	}
+
+	// 验证 EnabledLanes（所有值必须在 1-5 范围内）
+	for i, lane := range config.EnabledLanes {
+		if lane < 1 || lane > 5 {
+			return fmt.Errorf("enabledLanes[%d]: lane must be between 1 and 5, got %d", i, lane)
+		}
+	}
+
+	// 验证 OpeningType（必须是合法值或空）
+	validOpeningTypes := map[string]bool{
+		"tutorial": true,
+		"standard": true,
+		"special":  true,
+	}
+	if config.OpeningType != "" && !validOpeningTypes[config.OpeningType] {
+		return fmt.Errorf("openingType must be one of: tutorial, standard, special, got %q", config.OpeningType)
+	}
+
+	// 验证 SpecialRules（必须是合法值或空）
+	validSpecialRules := map[string]bool{
+		"bowling":  true,
+		"conveyor": true,
+	}
+	if config.SpecialRules != "" && !validSpecialRules[config.SpecialRules] {
+		return fmt.Errorf("specialRules must be one of: bowling, conveyor, got %q", config.SpecialRules)
+	}
+
+	// Story 8.6 QA修正: 验证 SoddingAnimLanes（如果配置了）
+	if len(config.SoddingAnimLanes) > 0 {
+		for _, lane := range config.SoddingAnimLanes {
+			if lane < 1 || lane > 5 {
+				return fmt.Errorf("invalid sodding animation lane %d (must be 1-5)", lane)
+			}
+		}
+	}
+
+	// Story 8.6 QA修正: 验证 PreSoddedLanes（如果配置了）
+	if len(config.PreSoddedLanes) > 0 {
+		for _, lane := range config.PreSoddedLanes {
+			if lane < 1 || lane > 5 {
+				return fmt.Errorf("invalid pre-sodded lane %d (must be 1-5)", lane)
+			}
+		}
+	}
+
+	// Story 19.4: 验证预设植物配置
+	for i, plant := range config.PresetPlants {
+		// 验证植物类型
+		if plant.Type == "" {
+			return fmt.Errorf("presetPlants[%d]: type is required", i)
+		}
+
+		// 验证行号（1-based，必须在 1-RowMax 范围内）
+		maxRow := config.RowMax
+		if maxRow == 0 {
+			maxRow = 5
+		}
+		if plant.Row < 1 || plant.Row > maxRow {
+			return fmt.Errorf("presetPlants[%d]: row must be between 1 and %d, got %d", i, maxRow, plant.Row)
+		}
+
+		// 验证列号（1-based，必须在 1-9 范围内）
+		if plant.Col < 1 || plant.Col > GridColumns {
+			return fmt.Errorf("presetPlants[%d]: col must be between 1 and %d, got %d", i, GridColumns, plant.Col)
+		}
+	}
+
+	// Story 8.14: 验证 RewardType
+	validRewardTypes := map[string]bool{
+		"plant": true,
+		"tool":  true,
+		"note":  true,
+	}
+	if config.RewardType != "" && !validRewardTypes[config.RewardType] {
+		return fmt.Errorf("rewardType must be one of: plant, tool, note, got %q", config.RewardType)
+	}
+
+	// Story 8.14: 当 RewardType 为 "note" 时，RewardNote 必须非空
+	if config.RewardType == "note" && config.RewardNote == "" {
+		return fmt.Errorf("rewardNote is required when rewardType is 'note'")
+	}
+
+	return nil
+}

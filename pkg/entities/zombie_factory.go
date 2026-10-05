@@ -1,0 +1,775 @@
+package entities
+
+import (
+	"fmt"
+	"math/rand"
+
+	"github.com/gonewx/pvz/pkg/components"
+	"github.com/gonewx/pvz/pkg/config"
+	"github.com/gonewx/pvz/pkg/ecs"
+	"github.com/gonewx/pvz/pkg/types"
+)
+
+// NewZombieEntity 创建普通僵尸实体
+// 僵尸从屏幕右侧外生成，可选择是否立即开始移动
+//
+// 参数:
+//   - em: 实体管理器
+//   - rm: 资源管理器（用于加载僵尸 Reanim 资源）
+//   - rs: Reanim 系统（用于初始化动画）
+//   - row: 生成行索引 (0-4)
+//   - spawnX: 生成的世界坐标X位置（通常在屏幕右侧外）
+//
+// 返回:
+//   - ecs.EntityID: 创建的僵尸实体ID，如果失败返回 0
+//   - error: 如果创建失败返回错误信息
+//
+// 注意：僵尸默认创建时速度为0（待命状态），需要通过 WaveSpawnSystem.ActivateWave() 激活
+// Story 14.3: Epic 14 - 移除 ReanimSystem 依赖，动画通过 AnimationCommand 组件初始化
+func NewZombieEntity(em *ecs.EntityManager, rm ResourceLoader, row int, spawnX float64) (ecs.EntityID, error) {
+	if em == nil {
+		return 0, fmt.Errorf("entity manager cannot be nil")
+	}
+	if rm == nil {
+		return 0, fmt.Errorf("resource manager cannot be nil")
+	}
+
+	// 计算僵尸Y坐标（世界坐标，基于行）
+	// 使用和植物相同的Y坐标计算，确保同一行的实体在同一高度
+	// 行中心 = GridWorldStartY + row*CellHeight + CellHeight/2.0
+	// 使用 config.ZombieVerticalOffset 以便手工调整
+	spawnY := config.GridWorldStartY + float64(row)*config.CellHeight + config.CellHeight/2.0 + config.ZombieVerticalOffset
+
+	// 创建实体
+	entityID := em.CreateEntity()
+
+	// 添加位置组件（世界坐标）
+	em.AddComponent(entityID, &components.PositionComponent{
+		X: spawnX,
+		Y: spawnY,
+	})
+
+	// Story 6.3: 使用 ReanimComponent 替代 AnimationComponent
+	// 从 ResourceManager 获取普通僵尸的 Reanim 数据和部件图片
+	// 使用僵尸注册表查询 ReanimName，避免硬编码
+	reanimName := config.GetZombieReanimName(types.ZombieBasic)
+	reanimXML := rm.GetReanimXML(reanimName)
+	partImages := rm.GetReanimPartImages(reanimName)
+
+	if reanimXML == nil || partImages == nil {
+		return 0, fmt.Errorf("failed to load %s Reanim resources", reanimName)
+	}
+
+	// 添加基础 ReanimComponent
+	// LastGroundX/Y 初始化为 0.0，用于根运动计算
+	// LastAnimFrame 初始化为 -1，表示尚未开始动画
+	em.AddComponent(entityID, &components.ReanimComponent{
+		ReanimName:        reanimName,
+		ReanimXML:         reanimXML,
+		PartImages:        partImages,
+		LastGroundX:       0.0,
+		LastGroundY:       0.0,
+		LastAnimFrame:     -1,
+		AccumulatedDeltaX: 0.0,
+		AccumulatedDeltaY: 0.0,
+	})
+
+	// ✅ Epic 14: 使用 AnimationCommand 触发动画（替代直接调用 ReanimSystem）
+	// 添加动画命令组件，让 ReanimSystem 在 Update 中处理
+	// Story 17.10: 使用配置驱动的 ComboName 而不是直接指定 AnimationName
+	// 这样可以确保正确应用 hidden_tracks（例如隐藏路障/铁桶）
+	ecs.AddComponent(em, entityID, &components.AnimationCommandComponent{
+		UnitID:    types.UnitIDZombie,
+		ComboName: "idle",
+		Processed: false,
+	})
+
+	// 添加速度组件（初始速度为0，待命状态）
+	// Story 8.3: 僵尸在预生成时不移动，等待 WaveSpawnSystem.ActivateWave() 激活
+	em.AddComponent(entityID, &components.VelocityComponent{
+		VX: 0.0, // 待命状态：不向左移动
+		VY: 0.0, // 待命状态：不垂直移动
+	})
+
+	// 添加行为组件（标识为普通僵尸，初始为 idle 状态）
+	// Story 8.3: 僵尸初始为静止状态，等待 WaveSpawnSystem.ActivateWave() 激活后切换为 Walking
+	em.AddComponent(entityID, &components.BehaviorComponent{
+		Type:            components.BehaviorZombieBasic,
+		ZombieAnimState: components.ZombieAnimIdle,
+		UnitID:          types.UnitIDZombie,
+	})
+
+	// 添加生命值组件（本Story定义但不使用，为Story 4.4准备）
+	em.AddComponent(entityID, &components.HealthComponent{
+		CurrentHealth: config.ZombieDefaultHealth,
+		MaxHealth:     config.ZombieDefaultHealth,
+	})
+
+	// 添加碰撞组件（用于检测子弹碰撞）
+	// Story 8.9 修复：设置 LaneIndex 用于同行碰撞检测
+	// 添加 OffsetX/OffsetY 使碰撞盒对齐僵尸身体
+	em.AddComponent(entityID, &components.CollisionComponent{
+		Width:     config.ZombieCollisionWidth,
+		Height:    config.ZombieCollisionHeight,
+		OffsetX:   config.ZombieCollisionOffsetX,
+		OffsetY:   config.ZombieCollisionOffsetY,
+		LaneIndex: row,
+	})
+
+	// Story 10.7: 为僵尸添加阴影组件
+	shadowSize := config.GetShadowSize("zombie")
+	em.AddComponent(entityID, &components.ShadowComponent{
+		Width:   shadowSize.Width,
+		Height:  shadowSize.Height,
+		Alpha:   config.DefaultShadowAlpha,
+		OffsetY: 0,
+	})
+
+	// 添加僵尸标签组件（用于统一识别僵尸实体）
+	em.AddComponent(entityID, &components.ZombieTagComponent{})
+
+	return entityID, nil
+}
+
+// NewConeheadZombieEntity 创建路障僵尸实体
+// 路障僵尸拥有370点护甲值，总生命值为640（护甲370+身体270）
+//
+// 参数:
+//   - em: 实体管理器
+//   - rm: 资源管理器（用于加载僵尸 Reanim 资源）
+//   - rs: Reanim 系统（用于初始化动画）
+//   - row: 生成行索引 (0-4)
+//   - spawnX: 生成的世界坐标X位置（通常在屏幕右侧外）
+//
+// 返回:
+//   - ecs.EntityID: 创建的路障僵尸实体ID，如果失败返回 0
+//   - error: 如果创建失败返回错误信息
+//
+// Story 14.3: Epic 14 - 移除 ReanimSystem 依赖，动画通过 AnimationCommand 组件初始化
+func NewConeheadZombieEntity(em *ecs.EntityManager, rm ResourceLoader, row int, spawnX float64) (ecs.EntityID, error) {
+	if em == nil {
+		return 0, fmt.Errorf("entity manager cannot be nil")
+	}
+	if rm == nil {
+		return 0, fmt.Errorf("resource manager cannot be nil")
+	}
+
+	// 计算僵尸Y坐标（世界坐标，基于行）
+	// 行中心 = GridWorldStartY + row*CellHeight + CellHeight/2.0
+	// 使用 config.ZombieVerticalOffset 以便手工调整
+	spawnY := config.GridWorldStartY + float64(row)*config.CellHeight + config.CellHeight/2.0 + config.ZombieVerticalOffset
+
+	// 创建实体
+	entityID := em.CreateEntity()
+
+	// 添加位置组件（世界坐标）
+	em.AddComponent(entityID, &components.PositionComponent{
+		X: spawnX,
+		Y: spawnY,
+	})
+
+	// Story 6.3: 使用 ReanimComponent 替代 AnimationComponent
+	// 从 ResourceManager 获取僵尸的 Reanim 数据和部件图片
+	// 注意：路障僵尸使用基础僵尸的动画（通过 UnitID 控制装备显示）
+	// 使用僵尸注册表查询 ReanimName，避免硬编码
+	reanimName := config.GetZombieReanimName(types.ZombieBasic)
+	reanimXML := rm.GetReanimXML(reanimName)
+	partImages := rm.GetReanimPartImages(reanimName)
+
+	if reanimXML == nil || partImages == nil {
+		return 0, fmt.Errorf("failed to load %s Reanim resources for Conehead", reanimName)
+	}
+
+	// 添加 ReanimComponent（路障僵尸：基础部件 + 路障）
+	// Story 13.7: 使用配置驱动，不再硬编码 VisibleTracks
+	// LastGroundX/Y 初始化为 0.0，用于根运动计算
+	// LastAnimFrame 初始化为 -1，表示尚未开始动画
+	em.AddComponent(entityID, &components.ReanimComponent{
+		ReanimName:        reanimName,
+		ReanimXML:         reanimXML,
+		PartImages:        partImages,
+		LastGroundX:       0.0,
+		LastGroundY:       0.0,
+		LastAnimFrame:     -1,
+		AccumulatedDeltaX: 0.0,
+		AccumulatedDeltaY: 0.0,
+	})
+
+	// ✅ Epic 14: 使用 AnimationCommand 触发动画（替代直接调用 ReanimSystem）
+	// 添加动画命令组件，让 ReanimSystem 在 Update 中处理
+	// Story 17.10: 使用配置驱动的 ComboName 而不是直接指定 AnimationName
+	// 这样可以确保正确显示路障（不被隐藏）同时隐藏其他装备
+	ecs.AddComponent(em, entityID, &components.AnimationCommandComponent{
+		UnitID:    types.UnitIDZombieConehead,
+		ComboName: "idle",
+		Processed: false,
+	})
+
+	// 添加速度组件（初始速度为0，待命状态）
+	// Story 8.3: 僵尸在预生成时不移动，等待 WaveSpawnSystem.ActivateWave() 激活
+	em.AddComponent(entityID, &components.VelocityComponent{
+		VX: 0.0, // 待命状态：不向左移动
+		VY: 0.0, // 待命状态：不垂直移动
+	})
+
+	// 添加行为组件（标识为路障僵尸，初始为 idle 状态）
+	// Story 8.3: 僵尸初始为静止状态，等待 WaveSpawnSystem.ActivateWave() 激活后切换为 Walking
+	em.AddComponent(entityID, &components.BehaviorComponent{
+		Type:            components.BehaviorZombieConehead,
+		ZombieAnimState: components.ZombieAnimIdle,
+		UnitID:          types.UnitIDZombieConehead,
+	})
+
+	// 添加护甲组件（路障僵尸的关键特性）
+	em.AddComponent(entityID, &components.ArmorComponent{
+		CurrentArmor: config.ConeheadZombieArmorHealth,
+		MaxArmor:     config.ConeheadZombieArmorHealth,
+		Type:         components.ArmorTypePlastic, // 塑料护甲
+	})
+
+	// 添加生命值组件（身体生命值270）
+	em.AddComponent(entityID, &components.HealthComponent{
+		CurrentHealth: config.ZombieDefaultHealth,
+		MaxHealth:     config.ZombieDefaultHealth,
+	})
+
+	// 添加碰撞组件（用于检测子弹碰撞）
+	// Story 8.9 修复：设置 LaneIndex 用于同行碰撞检测
+	// 添加 OffsetX/OffsetY 使碰撞盒对齐僵尸身体
+	em.AddComponent(entityID, &components.CollisionComponent{
+		Width:     config.ZombieCollisionWidth,
+		Height:    config.ZombieCollisionHeight,
+		OffsetX:   config.ZombieCollisionOffsetX,
+		OffsetY:   config.ZombieCollisionOffsetY,
+		LaneIndex: row,
+	})
+
+	// Story 10.7: 为路障僵尸添加阴影组件
+	shadowSize := config.GetShadowSize("zombie_cone")
+	em.AddComponent(entityID, &components.ShadowComponent{
+		Width:   shadowSize.Width,
+		Height:  shadowSize.Height,
+		Alpha:   config.DefaultShadowAlpha,
+		OffsetY: 0,
+	})
+
+	// 添加僵尸标签组件（用于统一识别僵尸实体）
+	em.AddComponent(entityID, &components.ZombieTagComponent{})
+
+	return entityID, nil
+}
+
+// NewBucketheadZombieEntity 创建铁桶僵尸实体
+// 铁桶僵尸拥有1100点护甲值，总生命值为1370（护甲1100+身体270）
+//
+// 参数:
+//   - em: 实体管理器
+//   - rm: 资源管理器（用于加载僵尸 Reanim 资源）
+//   - rs: Reanim 系统（用于初始化动画）
+//   - row: 生成行索引 (0-4)
+//   - spawnX: 生成的世界坐标X位置（通常在屏幕右侧外）
+//
+// 返回:
+//   - ecs.EntityID: 创建的铁桶僵尸实体ID，如果失败返回 0
+//   - error: 如果创建失败返回错误信息
+//
+// Story 14.3: Epic 14 - 移除 ReanimSystem 依赖，动画通过 AnimationCommand 组件初始化
+func NewBucketheadZombieEntity(em *ecs.EntityManager, rm ResourceLoader, row int, spawnX float64) (ecs.EntityID, error) {
+	if em == nil {
+		return 0, fmt.Errorf("entity manager cannot be nil")
+	}
+	if rm == nil {
+		return 0, fmt.Errorf("resource manager cannot be nil")
+	}
+
+	// 计算僵尸Y坐标（世界坐标，基于行）
+	// 行中心 = GridWorldStartY + row*CellHeight + CellHeight/2.0
+	// 使用 config.ZombieVerticalOffset 以便手工调整
+	spawnY := config.GridWorldStartY + float64(row)*config.CellHeight + config.CellHeight/2.0 + config.ZombieVerticalOffset
+
+	// 创建实体
+	entityID := em.CreateEntity()
+
+	// 添加位置组件（世界坐标）
+	em.AddComponent(entityID, &components.PositionComponent{
+		X: spawnX,
+		Y: spawnY,
+	})
+
+	// Story 6.3: 使用 ReanimComponent 替代 AnimationComponent
+	// 从 ResourceManager 获取僵尸的 Reanim 数据和部件图片
+	// 注意：铁桶僵尸使用基础僵尸的动画（通过 UnitID 控制装备显示）
+	// 使用僵尸注册表查询 ReanimName，避免硬编码
+	reanimName := config.GetZombieReanimName(types.ZombieBasic)
+	reanimXML := rm.GetReanimXML(reanimName)
+	partImages := rm.GetReanimPartImages(reanimName)
+
+	if reanimXML == nil || partImages == nil {
+		return 0, fmt.Errorf("failed to load %s Reanim resources for Buckethead", reanimName)
+	}
+
+	// 添加 ReanimComponent（铁桶僵尸：基础部件 + 铁桶）
+	// Story 13.7: 使用配置驱动，不再硬编码 VisibleTracks
+	// LastGroundX/Y 初始化为 0.0，用于根运动计算
+	// LastAnimFrame 初始化为 -1，表示尚未开始动画
+	em.AddComponent(entityID, &components.ReanimComponent{
+		ReanimName:        reanimName,
+		ReanimXML:         reanimXML,
+		PartImages:        partImages,
+		LastGroundX:       0.0,
+		LastGroundY:       0.0,
+		LastAnimFrame:     -1,
+		AccumulatedDeltaX: 0.0,
+		AccumulatedDeltaY: 0.0,
+	})
+
+	// ✅ Epic 14: 使用 AnimationCommand 触发动画（替代直接调用 ReanimSystem）
+	// 添加动画命令组件，让 ReanimSystem 在 Update 中处理
+	// Story 17.10: 使用配置驱动的 ComboName 而不是直接指定 AnimationName
+	// 这样可以确保正确显示铁桶（不被隐藏）同时隐藏其他装备
+	ecs.AddComponent(em, entityID, &components.AnimationCommandComponent{
+		UnitID:    types.UnitIDZombieBuckethead,
+		ComboName: "idle",
+		Processed: false,
+	})
+
+	// 添加速度组件（初始速度为0，待命状态）
+	// Story 8.3: 僵尸在预生成时不移动，等待 WaveSpawnSystem.ActivateWave() 激活
+	em.AddComponent(entityID, &components.VelocityComponent{
+		VX: 0.0, // 待命状态：不向左移动
+		VY: 0.0, // 待命状态：不垂直移动
+	})
+
+	// 添加行为组件（标识为铁桶僵尸，初始为 idle 状态）
+	// Story 8.3: 僵尸初始为静止状态，等待 WaveSpawnSystem.ActivateWave() 激活后切换为 Walking
+	em.AddComponent(entityID, &components.BehaviorComponent{
+		Type:            components.BehaviorZombieBuckethead,
+		ZombieAnimState: components.ZombieAnimIdle,
+		UnitID:          types.UnitIDZombieBuckethead,
+	})
+
+	// 添加护甲组件（铁桶僵尸的关键特性）
+	em.AddComponent(entityID, &components.ArmorComponent{
+		CurrentArmor: config.BucketheadZombieArmorHealth,
+		MaxArmor:     config.BucketheadZombieArmorHealth,
+		Type:         components.ArmorTypeMetal, // 金属护甲
+	})
+
+	// 添加生命值组件（身体生命值270）
+	em.AddComponent(entityID, &components.HealthComponent{
+		CurrentHealth: config.ZombieDefaultHealth,
+		MaxHealth:     config.ZombieDefaultHealth,
+	})
+
+	// 添加碰撞组件（用于检测子弹碰撞）
+	// Story 8.9 修复：设置 LaneIndex 用于同行碰撞检测
+	// 添加 OffsetX/OffsetY 使碰撞盒对齐僵尸身体
+	em.AddComponent(entityID, &components.CollisionComponent{
+		Width:     config.ZombieCollisionWidth,
+		Height:    config.ZombieCollisionHeight,
+		OffsetX:   config.ZombieCollisionOffsetX,
+		OffsetY:   config.ZombieCollisionOffsetY,
+		LaneIndex: row,
+	})
+
+	// Story 10.7: 为铁桶僵尸添加阴影组件
+	shadowSize := config.GetShadowSize("zombie_bucket")
+	em.AddComponent(entityID, &components.ShadowComponent{
+		Width:   shadowSize.Width,
+		Height:  shadowSize.Height,
+		Alpha:   config.DefaultShadowAlpha,
+		OffsetY: 0,
+	})
+
+	// 添加僵尸标签组件（用于统一识别僵尸实体）
+	em.AddComponent(entityID, &components.ZombieTagComponent{})
+
+	return entityID, nil
+}
+
+// NewFlagZombieEntity 创建旗帜僵尸实体
+// 旗帜僵尸与普通僵尸生命值相同（270），但外观不同（显示旗帜手+旗杆+旗子）
+// 旗帜僵尸通常在旗帜波出现，标志着大量僵尸即将来袭
+//
+// 实现方式：通过轨道合并，将 Zombie.reanim 和 Zombie_FlagPole.reanim 合并渲染
+//
+// 参数:
+//   - em: 实体管理器
+//   - rm: 资源管理器（用于加载僵尸 Reanim 资源）
+//   - row: 生成行索引 (0-4)
+//   - spawnX: 生成的世界坐标X位置（通常在屏幕右侧外）
+//
+// 返回:
+//   - ecs.EntityID: 创建的旗帜僵尸实体ID，如果失败返回 0
+//   - error: 如果创建失败返回错误信息
+func NewFlagZombieEntity(em *ecs.EntityManager, rm ResourceLoader, row int, spawnX float64) (ecs.EntityID, error) {
+	if em == nil {
+		return 0, fmt.Errorf("entity manager cannot be nil")
+	}
+	if rm == nil {
+		return 0, fmt.Errorf("resource manager cannot be nil")
+	}
+
+	// 计算僵尸Y坐标（世界坐标，基于行）
+	// 行中心 = GridWorldStartY + row*CellHeight + CellHeight/2.0
+	// 使用 config.ZombieVerticalOffset 以便手工调整
+	spawnY := config.GridWorldStartY + float64(row)*config.CellHeight + config.CellHeight/2.0 + config.ZombieVerticalOffset
+
+	// 创建实体
+	entityID := em.CreateEntity()
+
+	// 添加位置组件（世界坐标）
+	ecs.AddComponent(em, entityID, &components.PositionComponent{
+		X: spawnX,
+		Y: spawnY,
+	})
+
+	// 从 ResourceManager 获取僵尸的 Reanim 数据和部件图片
+	// 旗帜僵尸使用基础僵尸的动画（通过 UnitID 控制旗帜手显示）
+	// 使用僵尸注册表查询 ReanimName，避免硬编码
+	reanimName := config.GetZombieReanimName(types.ZombieBasic)
+	reanimXML := rm.GetReanimXML(reanimName)
+	partImages := rm.GetReanimPartImages(reanimName)
+
+	if reanimXML == nil || partImages == nil {
+		return 0, fmt.Errorf("failed to load %s Reanim resources for Flag Zombie", reanimName)
+	}
+
+	// 获取旗杆动画数据（用于轨道合并）
+	// 旗杆是特殊资源，使用配置常量
+	flagPoleReanimXML := rm.GetReanimXML(config.ReanimNameZombieFlagPole)
+	flagPolePartImages := rm.GetReanimPartImages(config.ReanimNameZombieFlagPole)
+
+	// 合并旗杆图片到主图片映射
+	if flagPolePartImages != nil {
+		for k, v := range flagPolePartImages {
+			partImages[k] = v
+		}
+	}
+
+	// 添加 ReanimComponent（旗帜僵尸：基础部件 + 旗帜手）
+	reanimComp := &components.ReanimComponent{
+		ReanimName:        reanimName,
+		ReanimXML:         reanimXML,
+		PartImages:        partImages,
+		LastGroundX:       0.0,
+		LastGroundY:       0.0,
+		LastAnimFrame:     -1,
+		AccumulatedDeltaX: 0.0,
+		AccumulatedDeltaY: 0.0,
+	}
+
+	// 如果旗杆动画数据可用，合并轨道
+	if flagPoleReanimXML != nil {
+		// 将旗杆动画的轨道合并到主动画（稍后由 ReanimSystem 处理）
+		// 存储在自定义字段或通过配置传递
+		reanimComp.OverlayReanimXML = flagPoleReanimXML
+		// 绑定到 Zombie_flaghand 轨道，使旗杆随手臂摆动
+		reanimComp.OverlayBindTrack = "Zombie_flaghand"
+	}
+
+	ecs.AddComponent(em, entityID, reanimComp)
+
+	// 使用 AnimationCommand 触发动画
+	// 使用 zombie_flag 配置，会自动显示旗帜手并隐藏普通手掌
+	ecs.AddComponent(em, entityID, &components.AnimationCommandComponent{
+		UnitID:    types.UnitIDZombieFlag,
+		ComboName: "idle",
+		Processed: false,
+	})
+
+	// 添加速度组件（初始速度为0，待命状态）
+	ecs.AddComponent(em, entityID, &components.VelocityComponent{
+		VX: 0.0,
+		VY: 0.0,
+	})
+
+	// 添加行为组件（标识为旗帜僵尸，初始为 idle 状态）
+	ecs.AddComponent(em, entityID, &components.BehaviorComponent{
+		Type:            components.BehaviorZombieFlag,
+		ZombieAnimState: components.ZombieAnimIdle,
+		UnitID:          types.UnitIDZombieFlag,
+	})
+
+	// 添加生命值组件（与普通僵尸相同）
+	ecs.AddComponent(em, entityID, &components.HealthComponent{
+		CurrentHealth: config.ZombieDefaultHealth,
+		MaxHealth:     config.ZombieDefaultHealth,
+	})
+
+	// 添加碰撞组件（用于检测子弹碰撞）
+	// 旗帜僵尸使用偏移量，使碰撞盒只检测身体部分而非旗子手
+	// Story 8.9 修复：设置 LaneIndex 用于同行碰撞检测
+	ecs.AddComponent(em, entityID, &components.CollisionComponent{
+		Width:     config.ZombieCollisionWidth,
+		Height:    config.ZombieCollisionHeight,
+		OffsetX:   config.ZombieFlagCollisionOffsetX,
+		OffsetY:   config.ZombieCollisionOffsetY,
+		LaneIndex: row,
+	})
+
+	// 为旗帜僵尸添加阴影组件
+	shadowSize := config.GetShadowSize("zombie")
+	ecs.AddComponent(em, entityID, &components.ShadowComponent{
+		Width:   shadowSize.Width,
+		Height:  shadowSize.Height,
+		Alpha:   config.DefaultShadowAlpha,
+		OffsetY: 0,
+	})
+
+	// 添加僵尸标签组件（用于统一识别僵尸实体）
+	ecs.AddComponent(em, entityID, &components.ZombieTagComponent{})
+
+	return entityID, nil
+}
+
+// ActivateZombie 激活僵尸实体，使其开始行走
+//
+// 该函数提供公共的僵尸激活逻辑，可被 WaveSpawnSystem 和验证程序等调用
+// 激活后，僵尸将：
+// - 设置行走速度
+// - 切换到行走动画状态
+// - 随机选择 walk 或 walk2 动画
+//
+// 参数:
+//   - em: 实体管理器
+//   - entityID: 僵尸实体ID
+//
+// 注意：此函数不处理波次状态（ZombieWaveStateComponent），
+// 波次相关逻辑由 WaveSpawnSystem 负责
+func ActivateZombie(em *ecs.EntityManager, entityID ecs.EntityID) {
+	// 设置行走速度
+	if vel, ok := ecs.GetComponent[*components.VelocityComponent](em, entityID); ok {
+		vel.VX = config.ZombieWalkSpeed
+	}
+
+	// 切换动画状态并添加行走动画命令
+	if behavior, ok := ecs.GetComponent[*components.BehaviorComponent](em, entityID); ok {
+		behavior.ZombieAnimState = components.ZombieAnimWalking
+
+		// 确定正确的 UnitID
+		unitID := behavior.UnitID
+		if unitID == "" {
+			unitID = types.UnitIDZombie
+		}
+
+		// 随机选择 walk 或 walk2 动画
+		walkCombo := "walk"
+		if rand.Float32() < 0.5 {
+			walkCombo = "walk2"
+		}
+
+		ecs.AddComponent(em, entityID, &components.AnimationCommandComponent{
+			UnitID:    unitID,
+			ComboName: walkCombo,
+			Processed: false,
+		})
+	}
+}
+
+// NewPolevaulterZombieEntity 创建撑杆僵尸实体
+// Story 8.9: 撑杆僵尸持杆时高速移动，遇到第一个植物时跳跃越过
+//
+// 特殊机制：
+// - 生命值：500（高于普通僵尸 270）
+// - 持杆时移动速度：54 像素/秒（普通僵尸的 1.8 倍）
+// - 跳跃后移动速度：30 像素/秒（与普通僵尸相同）
+// - 跳跃距离：约 1.5 格
+//
+// 参数:
+//   - em: 实体管理器
+//   - rm: 资源管理器（用于加载僵尸 Reanim 资源）
+//   - row: 生成行索引 (0-4)
+//   - spawnX: 生成的世界坐标X位置（通常在屏幕右侧外）
+//
+// 返回:
+//   - ecs.EntityID: 创建的撑杆僵尸实体ID，如果失败返回 0
+//   - error: 如果创建失败返回错误信息
+func NewPolevaulterZombieEntity(em *ecs.EntityManager, rm ResourceLoader, row int, spawnX float64) (ecs.EntityID, error) {
+	if em == nil {
+		return 0, fmt.Errorf("entity manager cannot be nil")
+	}
+	if rm == nil {
+		return 0, fmt.Errorf("resource manager cannot be nil")
+	}
+
+	// 计算僵尸Y坐标（世界坐标，基于行）
+	spawnY := config.GridWorldStartY + float64(row)*config.CellHeight + config.CellHeight/2.0 + config.ZombieVerticalOffset
+
+	// 创建实体
+	entityID := em.CreateEntity()
+
+	// 添加位置组件（世界坐标）
+	ecs.AddComponent(em, entityID, &components.PositionComponent{
+		X: spawnX,
+		Y: spawnY,
+	})
+
+	// 从 ResourceManager 获取撑杆僵尸的 Reanim 数据和部件图片
+	// 使用僵尸注册表查询 ReanimName，避免硬编码
+	reanimName := config.GetZombieReanimName(types.ZombiePolevaulter)
+	reanimXML := rm.GetReanimXML(reanimName)
+	partImages := rm.GetReanimPartImages(reanimName)
+
+	if reanimXML == nil || partImages == nil {
+		return 0, fmt.Errorf("failed to load %s Reanim resources", reanimName)
+	}
+
+	// 添加 ReanimComponent
+	ecs.AddComponent(em, entityID, &components.ReanimComponent{
+		ReanimName:        reanimName,
+		ReanimXML:         reanimXML,
+		PartImages:        partImages,
+		LastGroundX:       0.0,
+		LastGroundY:       0.0,
+		LastAnimFrame:     -1,
+		AccumulatedDeltaX: 0.0,
+		AccumulatedDeltaY: 0.0,
+	})
+
+	// 使用 AnimationCommand 触发 idle 动画
+	ecs.AddComponent(em, entityID, &components.AnimationCommandComponent{
+		UnitID:    types.UnitIDZombiePolevaulter,
+		ComboName: "idle",
+		Processed: false,
+	})
+
+	// 添加速度组件（初始速度为0，待命状态）
+	ecs.AddComponent(em, entityID, &components.VelocityComponent{
+		VX: 0.0,
+		VY: 0.0,
+	})
+
+	// 添加行为组件（标识为撑杆僵尸，初始为 idle 状态）
+	ecs.AddComponent(em, entityID, &components.BehaviorComponent{
+		Type:            components.BehaviorZombiePolevaulter,
+		ZombieAnimState: components.ZombieAnimIdle,
+		UnitID:          types.UnitIDZombiePolevaulter,
+	})
+
+	// 添加撑杆组件（初始持有撑杆）
+	ecs.AddComponent(em, entityID, &components.PoleVaultComponent{
+		HasPole:   true,
+		IsJumping: false,
+	})
+
+	// 添加生命值组件（500 点）
+	ecs.AddComponent(em, entityID, &components.HealthComponent{
+		CurrentHealth: config.PolevaulterZombieHealth,
+		MaxHealth:     config.PolevaulterZombieHealth,
+	})
+
+	// 添加碰撞组件（用于检测子弹碰撞）
+	// Story 8.9 修复：设置 LaneIndex 用于同行碰撞检测
+	// 撑杆僵尸使用特定的 X 偏移量
+	ecs.AddComponent(em, entityID, &components.CollisionComponent{
+		Width:     config.ZombieCollisionWidth,
+		Height:    config.ZombieCollisionHeight,
+		OffsetX:   config.PolevaulterCollisionOffsetX,
+		OffsetY:   config.ZombieCollisionOffsetY,
+		LaneIndex: row,
+	})
+
+	// 添加阴影组件
+	// Story 16.4: 使用统一的阴影偏移量，不再需要特殊补丁
+	shadowSize := config.GetShadowSize("zombie")
+	ecs.AddComponent(em, entityID, &components.ShadowComponent{
+		Width:  shadowSize.Width,
+		Height: shadowSize.Height,
+		Alpha:  config.DefaultShadowAlpha,
+	})
+
+	// 添加僵尸标签组件（用于统一识别僵尸实体）
+	ecs.AddComponent(em, entityID, &components.ZombieTagComponent{})
+
+	return entityID, nil
+}
+
+// ActivatePolevaulterZombie 激活撑杆僵尸实体，使其开始奔跑
+// Story 8.9: 撑杆僵尸激活后以高速奔跑
+//
+// 参数:
+//   - em: 实体管理器
+//   - entityID: 僵尸实体ID
+func ActivatePolevaulterZombie(em *ecs.EntityManager, entityID ecs.EntityID) {
+	// 检查是否有撑杆组件
+	poleVault, hasPole := ecs.GetComponent[*components.PoleVaultComponent](em, entityID)
+
+	// 设置移动速度（持杆时高速，否则普通速度）
+	if vel, ok := ecs.GetComponent[*components.VelocityComponent](em, entityID); ok {
+		if hasPole && poleVault.HasPole {
+			vel.VX = config.PolevaulterZombieRunSpeed // 高速奔跑
+		} else {
+			vel.VX = config.PolevaulterZombieWalkSpeed // 普通速度
+		}
+	}
+
+	// 切换动画状态并添加动画命令
+	if behavior, ok := ecs.GetComponent[*components.BehaviorComponent](em, entityID); ok {
+		behavior.ZombieAnimState = components.ZombieAnimWalking
+
+		// 持杆时使用 run 动画，否则使用 walk 动画
+		comboName := "walk"
+		if hasPole && poleVault.HasPole {
+			comboName = "run"
+		}
+
+		ecs.AddComponent(em, entityID, &components.AnimationCommandComponent{
+			UnitID:    types.UnitIDZombiePolevaulter,
+			ComboName: comboName,
+			Processed: false,
+		})
+	}
+}
+
+// =============================================================================
+// Story 18.4: 僵尸工厂注册表
+// =============================================================================
+
+// ZombieFactory 僵尸工厂函数类型
+//
+// 所有僵尸工厂函数都遵循相同的签名：
+//   - em: 实体管理器
+//   - rm: 资源加载器（用于加载 Reanim 资源）
+//   - row: 生成行索引 (0-4)
+//   - spawnX: 生成的世界坐标X位置
+//
+// 返回创建的实体ID和可能的错误
+type ZombieFactory func(em *ecs.EntityManager, rm ResourceLoader, row int, spawnX float64) (ecs.EntityID, error)
+
+// zombieFactories 僵尸工厂注册表
+//
+// Story 18.4: 使用 UnitID 作为键，映射到对应的工厂函数
+// 新增僵尸类型只需在此表中添加一行，恢复逻辑无需修改
+var zombieFactories = map[string]ZombieFactory{
+	types.UnitIDZombie:           NewZombieEntity,
+	types.UnitIDZombieConehead:   NewConeheadZombieEntity,
+	types.UnitIDZombieBuckethead: NewBucketheadZombieEntity,
+	types.UnitIDZombieFlag:       NewFlagZombieEntity,
+	types.UnitIDZombiePolevaulter: NewPolevaulterZombieEntity,
+}
+
+// GetZombieFactory 获取僵尸工厂函数
+//
+// Story 18.4: 通过 UnitID 查找对应的工厂函数
+// 如果找不到对应的工厂函数，返回 nil 和 false
+//
+// 参数:
+//   - unitID: 僵尸类型标识（如 "zombie", "zombie_polevaulter"）
+//
+// 返回:
+//   - ZombieFactory: 工厂函数，如果未找到返回 nil
+//   - bool: 是否找到对应的工厂函数
+func GetZombieFactory(unitID string) (ZombieFactory, bool) {
+	factory, ok := zombieFactories[unitID]
+	return factory, ok
+}
+
+// GetDefaultZombieFactory 获取默认僵尸工厂函数
+//
+// Story 18.4: 当找不到对应的工厂函数时，返回普通僵尸工厂
+// 作为回退策略，确保旧版存档不会导致崩溃
+func GetDefaultZombieFactory() ZombieFactory {
+	return NewZombieEntity
+}
+
