@@ -4,7 +4,7 @@
 
 | Metric | Value |
 |--------|-------|
-| Developer Background | Backend engineer, no game dev experience |
+| Developer Background | Backend engineer, dev design |
 | Go Source Code | 120,000+ lines (388 files) |
 | Development Approach | BMAD-METHOD workflow + Claude Code |
 | Manual Intervention | Architecture decisions, prompting, review |
