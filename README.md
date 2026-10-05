@@ -1,4 +1,4 @@
-# Plants vs. Zombies AI Recreation
+# Plants vs. Zombies
 
 | Metric | Value |
 |--------|-------|
