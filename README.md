@@ -1,11 +1,8 @@
-# Plants vs. Zombies AI Recreation
-
-> **A backend developer with ZERO game development experience** recreated "Plants vs. Zombies" using [BMAD-METHOD](https://github.com/bmad-code-org/BMAD-METHOD) + AI (Claude Code), achieving **120,000+ lines of Go code** with **99.9% AI-generated content**.
+# Plants vs. Zombies
 
 | Metric | Value |
 |--------|-------|
-| Developer Background | Backend engineer, no game dev experience |
-| AI Code Generation Rate | 99.9% |
+| Developer Background | Backend engineer, dev design |
 | Go Source Code | 120,000+ lines (388 files) |
 | Development Approach | BMAD-METHOD workflow + Claude Code |
 | Manual Intervention | Architecture decisions, prompting, review |
