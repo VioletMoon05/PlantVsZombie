@@ -59,6 +59,7 @@ type ResourceManager struct {
 	audioCache          map[string]*audio.Player            // Cache for loaded audio players: path -> Player
 	audioContext        *audio.Context                      // Global audio context for audio decoding
 	fontFaceCache       map[string]*text.GoTextFace         // Cache for Ebitengine v2 text faces
+	fontSourceCache     map[string]*text.GoTextFaceSource   // 每个字体文件只解析一次，不同字号共享（解析 CJK 字体会占用上百 MB 内存）
 	bitmapFontCache     map[string]*utils.BitmapFont        // Cache for bitmap fonts (Story 8.2)
 	reanimXMLCache      map[string]*reanim.ReanimXML        // Cache for parsed Reanim XML data: unit name -> ReanimXML
 	reanimImageCache    map[string]map[string]*ebiten.Image // Cache for Reanim part images: unit name -> (image ref -> Image)
@@ -510,16 +511,22 @@ func (rm *ResourceManager) LoadFont(path string, size float64) (*text.GoTextFace
 		return cachedFace, nil
 	}
 
-	// Read font file from embedded FS
-	fontData, err := embedded.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read font file %s: %w", path, err)
-	}
-
-	// Create GoTextFaceSource from font data
-	source, err := text.NewGoTextFaceSource(bytes.NewReader(fontData))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create font source for %s: %w", path, err)
+	// 同一字体文件只解析一次：字号不同的 face 共享同一个 Source。
+	// 否则每个新字号都会重新解析整个 TTF（SimHei 约 10MB），导致数百 MB 常驻堆与频繁 GC 卡顿。
+	source, ok := rm.fontSourceCache[path]
+	if !ok {
+		fontData, err := embedded.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read font file %s: %w", path, err)
+		}
+		source, err = text.NewGoTextFaceSource(bytes.NewReader(fontData))
+		if err != nil {
+			return nil, fmt.Errorf("failed to create font source for %s: %w", path, err)
+		}
+		if rm.fontSourceCache == nil {
+			rm.fontSourceCache = make(map[string]*text.GoTextFaceSource)
+		}
+		rm.fontSourceCache[path] = source
 	}
 
 	// Create GoTextFace with specified size

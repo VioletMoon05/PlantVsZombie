@@ -1,0 +1,470 @@
+package main
+
+import (
+	"flag"
+	"fmt"
+	"image/color"
+	"log"
+	"os"
+
+	"github.com/gonewx/pvz/pkg/components"
+	"github.com/gonewx/pvz/pkg/config"
+	"github.com/gonewx/pvz/pkg/ecs"
+	"github.com/gonewx/pvz/pkg/entities"
+	"github.com/gonewx/pvz/pkg/game"
+	"github.com/gonewx/pvz/pkg/modules"
+	"github.com/gonewx/pvz/pkg/systems"
+	"github.com/hajimehoshi/ebiten/v2"
+	"github.com/hajimehoshi/ebiten/v2/audio"
+	"github.com/hajimehoshi/ebiten/v2/inpututil"
+	"github.com/hajimehoshi/ebiten/v2/text/v2"
+)
+
+const (
+	screenWidth  = 800
+	screenHeight = 600
+)
+
+var (
+	// 命令行参数
+	plantID    = flag.String("plant", "", "植物ID (使用 --list 查看所有可用植物)")
+	toolID     = flag.String("tool", "", "工具ID (shovel)")
+	noteID     = flag.String("note", "", "来信ID (zombienote1, zombienote2, zombienote3, zombienote4)")
+	listPlants = flag.Bool("list", false, "列出所有可用植物")
+	verbose    = flag.Bool("verbose", false, "显示详细调试信息")
+	rewardType string // 奖励类型: "plant"、"tool" 或 "note"
+	rewardID   string // 奖励ID
+)
+
+// VerifyRewardAnimationGame 完整奖励动画流程验证游戏
+// 包含卡片包动画（Phase 1-3）和面板显示（Phase 4）
+type VerifyRewardAnimationGame struct {
+	entityManager         *ecs.EntityManager
+	gameState             *game.GameState
+	resourceManager       *game.ResourceManager
+	reanimSystem          *systems.ReanimSystem
+	particleSystem        *systems.ParticleSystem        // 粒子系统（用于光晕效果）
+	rewardSystem          *systems.RewardAnimationSystem // 奖励动画系统（Story 8.4重构：完全封装）
+	renderSystem          *systems.RenderSystem
+	plantCardRenderSystem *systems.PlantCardRenderSystem // 植物卡片渲染系统（测试用）
+	buttonSystem          *systems.ButtonSystem          // 按钮系统（来信面板需要）
+	buttonRenderSystem    *systems.ButtonRenderSystem    // 按钮渲染系统（来信面板需要）
+
+	debugFont *text.GoTextFace // 中文调试字体
+
+	triggered bool // 是否已触发奖励
+	completed bool // 是否已完成验证（所有阶段完成）
+}
+
+// NewVerifyRewardAnimationGame 创建验证游戏实例
+func NewVerifyRewardAnimationGame() (*VerifyRewardAnimationGame, error) {
+	// 创建 ECS 管理器
+	em := ecs.NewEntityManager()
+
+	// 创建音频上下文
+	audioContext := audio.NewContext(48000)
+
+	// 创建资源管理器
+	rm := game.NewResourceManager(audioContext)
+
+	// 加载资源配置
+	if err := rm.LoadResourceConfig("assets/config/resources.yaml"); err != nil {
+		return nil, fmt.Errorf("failed to load resource config: %w", err)
+	}
+
+	// 加载所有资源组
+	log.Println("Loading all resources...")
+	if err := rm.LoadAllResources(); err != nil {
+		log.Fatal("Failed to load resources:", err)
+	}
+
+	// 加载奖励面板资源（延迟加载组）
+	log.Println("Loading reward panel resources...")
+	if err := rm.LoadResourceGroup("DelayLoad_AwardScreen"); err != nil {
+		log.Printf("Warning: Failed to load reward panel resources: %v", err)
+	}
+
+	// 加载 Reanim 资源（用于植物动画显示）
+	log.Println("Loading Reanim resources...")
+	if err := rm.LoadReanimResources(); err != nil {
+		log.Fatal("Failed to load Reanim resources:", err)
+	}
+
+	// 加载 Reanim 配置管理器
+	log.Println("Loading Reanim config...")
+	reanimConfigManager, err := config.NewReanimConfigManager("data/reanim_config")
+	if err != nil {
+		return nil, fmt.Errorf("failed to load reanim config: %w", err)
+	}
+
+	// 获取游戏状态单例
+	gs := game.GetGameState()
+	gs.CameraX = config.GameCameraX // 设置摄像机位置
+
+	// 加载 LawnStrings（用于奖励面板文本显示）
+	lawnStrings, err := game.NewLawnStrings("assets/properties/LawnStrings.txt")
+	if err != nil {
+		return nil, fmt.Errorf("failed to load LawnStrings: %w", err)
+	}
+	gs.LawnStrings = lawnStrings
+
+	// 创建音频管理器并设置到 GameState
+	audioManager := game.NewAudioManager(rm, nil)
+	gs.SetAudioManager(audioManager)
+
+	// 创建系统
+	reanimSystem := systems.NewReanimSystem(em)
+	// 设置配置管理器（必须在 PlayCombo 之前设置）
+	reanimSystem.SetConfigManager(reanimConfigManager)
+	particleSystem := systems.NewParticleSystem(em, rm) // 粒子系统用于光晕效果
+	renderSystem := systems.NewRenderSystem(em)
+
+	// 创建按钮系统（来信面板需要）
+	buttonSystem := systems.NewButtonSystem(em)
+	buttonRenderSystem := systems.NewButtonRenderSystem(em)
+
+	// Story 8.4重构：RewardAnimationSystem完全封装所有渲染逻辑
+	// 内部自动创建和管理所有渲染系统（Reanim、粒子、卡片、面板）
+	rewardSystem := systems.NewRewardAnimationSystem(em, gs, rm, nil, reanimSystem, particleSystem, renderSystem)
+
+	// Story 8.14: 注入来信面板工厂（使用真正的 ZombieNotePanelModule，与 verify_reward_panel 保持一致）
+	rewardSystem.SetNotePanelFactory(func(noteID string, onNextLevel func(), onMainMenu func()) (systems.NotePanelModule, error) {
+		// 创建按钮渲染回调函数
+		drawButtonFunc := func(screen *ebiten.Image, buttonEntity ecs.EntityID) {
+			buttonRenderSystem.DrawButton(screen, buttonEntity)
+		}
+
+		// 创建真正的 ZombieNotePanelModule
+		return modules.NewZombieNotePanelModule(
+			em,
+			rm,
+			gs,
+			drawButtonFunc,
+			screenWidth,
+			screenHeight,
+			noteID,
+			onNextLevel,
+			onMainMenu,
+		)
+	})
+
+	// 创建植物选择栏卡片（用于测试渲染顺序）
+	sunFont, err := rm.LoadFont("assets/fonts/SimHei.ttf", config.PlantCardSunCostFontSize)
+	if err != nil {
+		log.Printf("Warning: Failed to load sun cost font: %v", err)
+		sunFont = nil
+	}
+	plantCardRenderSystem := systems.NewPlantCardRenderSystem(em, sunFont) // Draw() 会自动过滤奖励卡片
+
+	// 创建两张测试卡片（向日葵和豌豆射手）
+	entities.NewPlantCardEntity(em, rm, reanimSystem, components.PlantSunflower, 100, 10, config.PlantCardScale)
+	entities.NewPlantCardEntity(em, rm, reanimSystem, components.PlantPeashooter, 160, 10, config.PlantCardScale)
+
+	// 加载中文调试字体
+	debugFont, err := rm.LoadFont("assets/fonts/SimHei.ttf", 14)
+	if err != nil {
+		log.Printf("Warning: Failed to load debug font: %v", err)
+		debugFont = nil
+	}
+
+	log.Println("╔════════════════════════════════════════════════════════╗")
+	log.Println("║      完整奖励动画流程验证程序 (Story 8.3 + 8.4)         ║")
+	log.Println("╚════════════════════════════════════════════════════════╝")
+	log.Printf("[VerifyRewardAnimation] 测试类型: %s, ID: %s", rewardType, rewardID)
+	log.Println()
+	log.Println("【验证流程】")
+	log.Println("  Phase 1: appearing     - 卡片包/工具弹出动画 (0.6s)")
+	log.Println("  Phase 2: waiting       - 等待用户点击 (手动触发)")
+	log.Println("  Phase 3: expanding     - 移动+展开动画 (2s)")
+	log.Println("  Phase 3.5: pausing     - 短暂停顿+Award粒子 (2.5s)")
+	log.Println("  Phase 3.6: disappearing - 渐渐消失 (1.0s)")
+	log.Println("  Phase 4: showing       - 显示奖励面板 (持续)")
+	log.Println()
+	log.Println("【快捷键】")
+	log.Println("  Space/Click - 展开卡片包/工具 (Phase 2)")
+	log.Println("  R - 重启验证")
+	log.Println("  Q - 退出程序")
+	log.Println("════════════════════════════════════════════════════════")
+
+	game := &VerifyRewardAnimationGame{
+		entityManager:         em,
+		gameState:             gs,
+		resourceManager:       rm,
+		reanimSystem:          reanimSystem,
+		particleSystem:        particleSystem,
+		rewardSystem:          rewardSystem,
+		renderSystem:          renderSystem,
+		plantCardRenderSystem: plantCardRenderSystem,
+		buttonSystem:          buttonSystem,
+		buttonRenderSystem:    buttonRenderSystem,
+		debugFont:             debugFont,
+		triggered:             false,
+		completed:             false,
+	}
+
+	// 自动触发奖励动画（无需手动按T键）
+	log.Printf("[VerifyRewardAnimation] 自动触发奖励动画 (类型: %s, ID: %s)", rewardType, rewardID)
+	rewardSystem.TriggerReward(rewardType, rewardID)
+	game.triggered = true
+
+	return game, nil
+}
+
+// Update 更新游戏逻辑
+func (vg *VerifyRewardAnimationGame) Update() error {
+	// 快捷键：T 键手动触发奖励（如果未触发）
+	if inpututil.IsKeyJustPressed(ebiten.KeyT) && !vg.triggered {
+		log.Printf("[VerifyRewardAnimation] 手动触发奖励动画 (类型: %s, ID: %s)", rewardType, rewardID)
+		vg.rewardSystem.TriggerReward(rewardType, rewardID)
+		vg.triggered = true
+	}
+
+	// 快捷键：R 键重启
+	if inpututil.IsKeyJustPressed(ebiten.KeyR) {
+		log.Println("[VerifyRewardAnimation] 重启验证")
+		vg.reset()
+		return nil
+	}
+
+	// 快捷键：Q 键退出
+	if inpututil.IsKeyJustPressed(ebiten.KeyQ) {
+		log.Println("[VerifyRewardAnimation] 退出验证程序")
+		return fmt.Errorf("quit")
+	}
+
+	// 更新系统
+	dt := 1.0 / 60.0
+	vg.reanimSystem.Update(dt)
+	vg.particleSystem.Update(dt) // 更新粒子系统
+	vg.buttonSystem.Update(dt)   // 更新按钮系统（来信面板需要）
+
+	// 更新奖励系统（包含完整的 4 个阶段）
+	vg.rewardSystem.Update(dt)
+
+	// 更新鼠标光标（奖励图标和按钮悬停时显示手形）
+	cursorShape := vg.rewardSystem.GetCursorShape()
+	ebiten.SetCursorShape(cursorShape)
+
+	// 检查是否完成所有阶段
+	if vg.triggered && !vg.completed {
+		rewardComp, ok := ecs.GetComponent[*components.RewardAnimationComponent](
+			vg.entityManager,
+			vg.rewardSystem.GetEntity(),
+		)
+		if ok && rewardComp.Phase == "showing" && rewardComp.ElapsedTime > 1.0 {
+			// Phase 4 (showing) 持续 1 秒后标记为完成
+			if !vg.completed {
+				log.Println("╔════════════════════════════════════════════════════════╗")
+				log.Println("║           ✅ 完整奖励动画流程验证完成！               ║")
+				log.Println("╚════════════════════════════════════════════════════════╝")
+				log.Println()
+				log.Println("【验证成果】")
+				log.Println("  ✅ Phase 1: appearing     - 卡片包弹出 (完成)")
+				log.Println("  ✅ Phase 2: waiting       - 等待点击 (完成)")
+				log.Println("  ✅ Phase 3: expanding     - 移动+展开动画 (完成)")
+				log.Println("  ✅ Phase 3.5: pausing     - 短暂停顿+粒子 (完成)")
+				log.Println("  ✅ Phase 3.6: disappearing - 卡片包消失 (完成)")
+				if rewardType == "note" {
+					// 来信奖励有额外的淡入淡出阶段
+					log.Println("  ✅ Phase 3.7: fadingOut   - 画面淡出 (完成)")
+					log.Println("  ✅ Phase 3.8: fadingIn    - 面板淡入 (完成)")
+					log.Println("  ✅ Phase 4: showing       - 来信面板显示 (完成)")
+				} else {
+					log.Println("  ✅ Phase 4: showing       - 面板显示 (完成)")
+				}
+				log.Println()
+				log.Println("按 R 重启或 Q 退出")
+				log.Println("════════════════════════════════════════════════════════")
+				vg.completed = true
+			}
+		}
+	}
+
+	return nil
+}
+
+// Draw 绘制游戏画面
+func (vg *VerifyRewardAnimationGame) Draw(screen *ebiten.Image) {
+	// 清空屏幕
+	screen.Fill(color.RGBA{0, 0, 0, 255})
+
+	// 手动绘制背景
+	backgroundImg := vg.resourceManager.GetImageByID("IMAGE_BACKGROUND1")
+	if backgroundImg != nil {
+		opts := &ebiten.DrawImageOptions{}
+		opts.GeoM.Translate(-vg.gameState.CameraX, 0)
+		screen.DrawImage(backgroundImg, opts)
+	}
+
+	// 渲染顺序（从下到上）：
+	// 1. 背景（已绘制）
+	// 2. 植物选择栏卡片（游戏世界元素）
+	// 3. 游戏世界粒子效果（过滤 UI 粒子）
+	// 4. 奖励动画（UI 元素，内部顺序：Reanim → 粒子 → 卡片）
+	//
+	// 最终渲染层级（从下到上）：
+	//   背景 → 选择栏卡片 → 游戏粒子 → 奖励Reanim → 奖励粒子 → 奖励卡片
+	vg.plantCardRenderSystem.Draw(screen)                                // 游戏世界卡片
+	vg.renderSystem.DrawGameWorldParticles(screen, vg.gameState.CameraX) // 游戏世界粒子
+	vg.rewardSystem.Draw(screen)                                         // 奖励动画（内部：Reanim → 粒子 → 卡片）
+}
+
+// Layout 设置屏幕布局
+func (vg *VerifyRewardAnimationGame) Layout(outsideWidth, outsideHeight int) (int, int) {
+	return screenWidth, screenHeight
+}
+
+// reset 重置验证程序
+func (vg *VerifyRewardAnimationGame) reset() {
+	// 清理旧的奖励实体
+	if vg.rewardSystem.GetEntity() != 0 {
+		vg.entityManager.DestroyEntity(vg.rewardSystem.GetEntity())
+	}
+	vg.entityManager.RemoveMarkedEntities()
+
+	// 重新创建奖励系统
+	vg.rewardSystem = systems.NewRewardAnimationSystem(
+		vg.entityManager,
+		vg.gameState,
+		vg.resourceManager,
+		nil, // sceneManager（测试程序不需要）
+		vg.reanimSystem,
+		vg.particleSystem,
+		vg.renderSystem,
+	)
+
+	vg.triggered = false
+	vg.completed = false
+
+	// 自动触发
+	log.Printf("[VerifyRewardAnimation] 重新触发奖励动画 (类型: %s, ID: %s)", rewardType, rewardID)
+	vg.rewardSystem.TriggerReward(rewardType, rewardID)
+	vg.triggered = true
+}
+
+// drawDebugInfo 绘制调试信息（已禁用）
+func (vg *VerifyRewardAnimationGame) drawDebugInfo(screen *ebiten.Image) {
+	// 为了专注测试渲染顺序，暂时禁用调试信息
+	// 如需启用，取消注释以下代码
+}
+
+// splitLines 将文本按换行符分割成行
+func splitLines(text string) []string {
+	lines := []string{}
+	currentLine := ""
+	for _, ch := range text {
+		if ch == '\n' {
+			lines = append(lines, currentLine)
+			currentLine = ""
+		} else {
+			currentLine += string(ch)
+		}
+	}
+	if currentLine != "" {
+		lines = append(lines, currentLine)
+	}
+	return lines
+}
+
+func main() {
+	flag.Parse()
+
+	// 设置日志输出
+	if !*verbose {
+		log.SetOutput(os.Stdout)
+	}
+
+	// 列出所有可用植物
+	if *listPlants {
+		allPlants := config.GetAllPlants()
+		fmt.Println("可用植物ID:")
+		for _, plant := range allPlants {
+			fmt.Printf("  %s\n", plant.ID)
+		}
+		os.Exit(0)
+	}
+
+	// 验证参数：必须指定 --plant 或 --tool 或 --note 其中之一
+	validTools := map[string]bool{
+		"shovel": true,
+	}
+
+	validNotes := map[string]bool{
+		"zombienote1": true,
+		"zombienote2": true,
+		"zombienote3": true,
+		"zombienote4": true,
+	}
+
+	// 检查参数互斥
+	paramCount := 0
+	if *plantID != "" {
+		paramCount++
+	}
+	if *toolID != "" {
+		paramCount++
+	}
+	if *noteID != "" {
+		paramCount++
+	}
+
+	if paramCount > 1 {
+		fmt.Fprintln(os.Stderr, "错误: 不能同时指定 --plant、--tool 和 --note")
+		os.Exit(1)
+	}
+
+	if *plantID != "" {
+		// 使用植物注册表验证植物ID
+		if config.GetPlantByID(*plantID) == nil {
+			fmt.Fprintf(os.Stderr, "错误: 无效的植物ID '%s'\n", *plantID)
+			fmt.Fprintln(os.Stderr, "使用 --list 查看所有可用植物")
+			os.Exit(1)
+		}
+		rewardType = "plant"
+		rewardID = *plantID
+	} else if *toolID != "" {
+		if !validTools[*toolID] {
+			fmt.Fprintf(os.Stderr, "错误: 无效的工具ID '%s'\n", *toolID)
+			fmt.Fprintln(os.Stderr, "有效的工具ID: shovel")
+			os.Exit(1)
+		}
+		rewardType = "tool"
+		rewardID = *toolID
+	} else if *noteID != "" {
+		if !validNotes[*noteID] {
+			fmt.Fprintf(os.Stderr, "错误: 无效的来信ID '%s'\n", *noteID)
+			fmt.Fprintln(os.Stderr, "有效的来信ID: zombienote1, zombienote2, zombienote3, zombienote4")
+			os.Exit(1)
+		}
+		rewardType = "note"
+		rewardID = *noteID
+	} else {
+		// 默认测试向日葵
+		rewardType = "plant"
+		rewardID = "sunflower"
+	}
+
+	// 创建游戏实例
+	verifyGame, err := NewVerifyRewardAnimationGame()
+	if err != nil {
+		log.Fatalf("Failed to create verify game: %v", err)
+	}
+
+	// 设置窗口标题
+	var title string
+	switch rewardType {
+	case "tool":
+		title = fmt.Sprintf("完整奖励动画流程验证 - 工具:%s", rewardID)
+	case "note":
+		title = fmt.Sprintf("完整奖励动画流程验证 - 来信:%s", rewardID)
+	default:
+		title = fmt.Sprintf("完整奖励动画流程验证 - 植物:%s", rewardID)
+	}
+	ebiten.SetWindowTitle(title)
+	ebiten.SetWindowSize(screenWidth, screenHeight)
+
+	// 运行游戏
+	if err := ebiten.RunGame(verifyGame); err != nil {
+		log.Fatal(err)
+	}
+}
